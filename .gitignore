@@ -1,0 +1,89 @@
+# Python
+data/reports/
+data/screenshots/
+data/faiss/
+*.log
+__pycache__/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.env
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Data files (generated at runtime)
+data/
+reports/
+*.pdf
+*.db
+*.sqlite
+*.sqlite3
+*.faiss
+*.pkl
+*.parquet
+
+# Screenshots (generated at runtime)
+screenshots/
+*.png
+*.jpg
+*.jpeg
+*.webp
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Docker
+.dockerignore
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Environment variables (keep template)
+.env
+.env.local
+.env.*.local
+
+# Lock files (optional - some prefer to commit lock files)
+# uv.lock
+# requirements.txt  # Use pyproject.toml instead
