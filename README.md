@@ -128,10 +128,9 @@ URL Input
 ### Utilities
 | Technology | Purpose |
 |------------|---------|
-| HuggingFace Tokenizers | Token counting |
+| HuggingFace Tokenizers | Tokenize Text |
 | ReportLab | PDF generation |
 | ddgs | DuckDuckGo search |
-| python-dotenv | Environment config |
 
 ---
 
@@ -224,20 +223,7 @@ HF_API_KEY="hf_xxx"  # For HuggingFace tokenizer
 
 **Result:** Competitor results now only include actual company websites with proper brand names.
 
-### Problem 2: Tracxn Search Not Finding Company Pages
-
-**Issue:** Tracxn search query "tracxn [brand]" returned the Tracxn homepage or login page instead of the actual company profile page.
-
-**Root Cause:** Generic queries returned multiple results, and the code was selecting the first tracxn.com URL without checking if it was a valid company page.
-
-**Solution Implemented:**
-- Changed Tracxn search query to `"tracxn \"{brand}\" company profile"` for better targeting
-- Added URL filters to reject `/login` and `/signup` pages
-- Falls back to DDG competitor listing pages when Tracxn fails
-
-**Result:** Correct Tracxn company profile pages are now found and crawled.
-
-### Problem 3: Crawled Pages Not Containing Competitor Lists
+### Problem 2: Crawled Pages Not Containing Competitor Lists
 
 **Issue:** The crawler was getting partial page content (without JavaScript rendering), so competitor names in "Competitors" or "Alternatives" sections were not extracted.
 
@@ -253,21 +239,7 @@ HF_API_KEY="hf_xxx"  # For HuggingFace tokenizer
 
 **Result:** Competitor names are now extracted from multiple text formats on crawled pages.
 
-### Problem 4: Extracted Competitor Names Without Website URLs
-
-**Issue:** Competitor names were extracted from crawled pages, but no official website URLs were available in the text.
-
-**Root Cause:** Tracxn pages list competitor names but don't always include their direct website links.
-
-**Solution Implemented:**
-- Added `_find_company_website()` function
-- Searches DDG for "[Brand Name] official website"
-- Falls back to simple "[Brand Name]" query if official website not found
-- Filters out social media, wiki, and Q&A sites from results
-
-**Result:** Each extracted competitor now has a validated website URL.
-
-### Problem 5: LLM Validation Not Working Correctly
+### Problem 3: LLM Validation Not Working Correctly
 
 **Issue:** LLM validation was accepting irrelevant results like stackexchange.com, zhihu.com, and skincare.com as valid competitors.
 
@@ -282,7 +254,7 @@ HF_API_KEY="hf_xxx"  # For HuggingFace tokenizer
 
 **Result:** LLM validation now properly filters out irrelevant competitors.
 
-### Problem 6: LLM Rate Limiting
+### Problem 4: LLM Rate Limiting
 
 **Issue:** Groq rate limits (200,000 tokens per day) were being reached, causing validation and fallback to fail.
 
@@ -295,19 +267,6 @@ HF_API_KEY="hf_xxx"  # For HuggingFace tokenizer
 - Re-validation happens after LLM fallback if needed
 
 **Result:** System handles rate limits gracefully and still produces usable results.
-
-### Problem 7: Crawler 429 Errors
-
-**Issue:** Some competitor websites (e.g., thedeconstruct.in, worldofasaya.com) were returning 429 rate limit errors during crawling.
-
-**Root Cause:** Aggressive crawling without retry logic caused immediate failure when servers blocked requests.
-
-**Solution Implemented:**
-- Added retry mechanism with exponential backoff for 429 responses
-- Maximum 3 retries per URL
-- Backoff starts at 2 seconds, doubles with each retry (2s → 4s → 8s)
-- Generic exception handling also retries with backoff
-- Polite 1.5s delay between page requests to reduce rate limit probability
 
 **Configuration:**
 ```python
@@ -490,55 +449,43 @@ Competitor/
 │   ├── main.py                    # FastAPI server with lifespan
 │   ├── pipeline.py                # Orchestrates full pipeline
 │   ├── schemas.py                 # API request/response models
-│   └── __init__.py
 │
 ├── competitor_discovery/
 │   ├── discovery.py               # Competitor discovery with LLM + DDG
-│   └── __init__.py
 │
 ├── crawler/
 │   ├── crawler.py                 # Adaptive BFS web crawler with retry + exponential backoff
-│   └── __init__.py
 │
 ├── processing/
 │   ├── text_processor.py          # Text cleaning and chunking
 │   ├── dom_analyzer.py            # DOM structure analysis
-│   └── __init__.py
 │
 ├── vision/
 │   ├── visual_analyzer.py         # Screenshot analysis with Groq
-│   └── __init__.py
 │
 ├── extraction/
 │   ├── business_extractor.py      # Structured business profile extraction
-│   └── __init__.py
 │
 ├── analysis/
 │   ├── comparator.py              # Comparative intelligence analysis
-│   └── __init__.py
 │
 ├── embedding/
 │   ├── embedder.py                # Jina embeddings + Pinecone vector store
-│   └── __init__.py
 │
 ├── reporting/
 │   ├── report_generator.py        # PDF report generation
-│   └── __init__.py
 │
 ├── database/
 │   ├── models.py                  # SQLAlchemy models
 │   ├── session.py                 # Database session management
-│   └── __init__.py
 │
 ├── frontend/
 │   ├── app.py                     # Streamlit dashboard
-│   └── __init__.py
 │
 └── utils/
     ├── config.py                  # Configuration settings
     ├── helpers.py                 # Utility functions
     ├── logger.py                  # Logging setup
-    └── __init__.py
 ```
 
 ---
@@ -647,15 +594,6 @@ competitors = discover_competitors(
 
 ## Troubleshooting
 
-### Pinecone Connection Issues
-
-**Problem:** `Pinecone not initialized` error
-
-**Solution:**
-1. Verify `PINECONE_API_KEY` is set in `.env`
-2. Check that Pinecone environment matches your account region
-3. Ensure Pinecone index exists or serverless is enabled
-
 ### LLM Rate Limits
 
 **Problem:** Too many requests to Groq API causing rate limit errors
@@ -676,19 +614,6 @@ competitors = discover_competitors(
 2. Increase `CRAWL_TIMEOUT_MS` for slower websites
 3. Parallel crawling automatically handles timeouts
 
-### Streamlit Not Starting
-
-**Problem:** `port already in use` error
-
-**Solution:**
-```bash
-# Kill existing Streamlit process
-taskkill //F //IM streamlit.exe
-
-# Restart on different port
-uv run streamlit run frontend/app.py --server.port 8502
-```
-
 ### Database Issues
 
 **Problem:** Database connection errors
@@ -697,33 +622,6 @@ uv run streamlit run frontend/app.py --server.port 8502
 1. Run: `python -c "from database.session import init_db; init_db()"`
 2. Check that `data/` directory exists
 3. Verify file permissions on database location
-
-### Tracxn Not Finding Company Pages
-
-**Problem:** Tracxn search returns login page or homepage instead of company profile
-
-**Solution:**
-1. Use more specific query: `tracxn "{brand}" company profile`
-2. Check if Tracxn page requires authentication
-3. Fall back to DDG competitor listing pages
-
-### Competitor Extraction Returning Empty Results
-
-**Problem:** Crawling Tracxn pages returns 0 competitors
-
-**Solution:**
-1. Check if page content includes competitor names in text
-2. Verify regex patterns match page format (supports multiple formats)
-3. Try DDG search for "[brand] competitors" instead
-
-### DDG Rate Limits
-
-**Problem:** Too many DuckDuckGo requests causing rate limiting
-
-**Solution:**
-1. System includes 1-second delay between queries
-2. Only searches until first valid competitor listing page found
-3. Falls back to LLM discovery if DDG fails
 
 ---
 
