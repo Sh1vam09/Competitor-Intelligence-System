@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 """
 Database session management and initialization.
 
@@ -59,7 +59,7 @@ def get_db_dependency():
         yield db
     finally:
         db.close()
-=======
+
 """
 Database session management and initialization.
 
@@ -120,4 +120,4 @@ def get_db_dependency():
         yield db
     finally:
         db.close()
->>>>>>> c8b6483 (updated the report and fixed bugs)
+

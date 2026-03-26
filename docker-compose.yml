@@ -10,7 +10,7 @@ services:
       - "8000:8000"   # FastAPI backend
       - "8501:8501"   # Streamlit frontend
     environment:
-      - GROQ_API_KEY=${GROQ_API_KEY:}
+      - GROQ_API_KEY=${GROQ_API_KEY:-}
     volumes:
       - ./data:/app/data         # Persist database
       - ./reports:/app/reports   # Persist PDF reports

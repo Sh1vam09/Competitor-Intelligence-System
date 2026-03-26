@@ -151,7 +151,7 @@ def _empty_business_profile() -> dict:
     """Return an empty/default business profile."""
     return {key: "Not detected" if key != "CTA_aggressiveness_score" else 5.0
             for key in BUSINESS_PROFILE_KEYS}
-=======
+
 """
 Structured Business Extraction Module.
 

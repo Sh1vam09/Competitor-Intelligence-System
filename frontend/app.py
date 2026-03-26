@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 """
 Streamlit Frontend for the Competitor Intelligence Engine.
 
@@ -450,7 +450,7 @@ st.markdown(
     '</p>',
     unsafe_allow_html=True,
 )
-=======
+
 """
 Streamlit Frontend for the Competitor Intelligence Engine.
 
@@ -928,4 +928,4 @@ st.markdown(
     "</p>",
     unsafe_allow_html=True,
 )
->>>>>>> c8b6483 (updated the report and fixed bugs)
+

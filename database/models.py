@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+
 """
 SQLAlchemy ORM models for the Competitor Intelligence Engine.
 
@@ -124,7 +124,7 @@ class Report(Base):
 
     def __repr__(self) -> str:
         return f"<Report(id={self.id}, company_id={self.company_id})>"
-=======
+
 """
 SQLAlchemy ORM models for the Competitor Intelligence Engine.
 
@@ -250,4 +250,4 @@ class Report(Base):
 
     def __repr__(self) -> str:
         return f"<Report(id={self.id}, company_id={self.company_id})>"
->>>>>>> c8b6483 (updated the report and fixed bugs)
+
