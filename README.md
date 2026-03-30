@@ -7,7 +7,7 @@ This project provides automated competitive intelligence analysis for any websit
 ### What It Does
 
 1. **Analyze any website** - Crawls and extracts structured business information
-2. **Find competitors** - Uses AI-generated search queries to find relevant competitors
+2. **Find competitors** - Discovers local (India) competitors via Tracxn and global competitors through AI-validated search on market listing platforms
 3. **Compare brands** - Performs detailed comparative analysis of market positioning
 4. **Generate reports** - Creates PDF reports with strategic recommendations
 
