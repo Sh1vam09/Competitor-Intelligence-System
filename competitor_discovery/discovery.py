@@ -4,16 +4,18 @@ Competitor Discovery Module.
 Uses a two-pronged approach to discover competitors:
 1. LLM-based discovery (Groq via LangChain) — asks the LLM to identify competitors
    based on the business profile. Fast and reliable.
-2. DuckDuckGo SERP search (LangChain) — used to search with brand features
+2. Tavily web search — used to search with brand features
    to find competitors with enhanced queries.
 """
 
 import json
+import re
 import sys
 import time
 from urllib.parse import urlparse
+import requests
+from bs4 import BeautifulSoup
 
-from langchain_community.tools import DuckDuckGoSearchRun
 from langchain_core.messages import HumanMessage
 
 from utils.config import (
@@ -22,6 +24,8 @@ from utils.config import (
     MAX_COMPETITORS,
     MAX_SEARCH_RESULTS,
     SEARCH_RATE_LIMIT_DELAY,
+    TAVILY_API_KEY,
+    TAVILY_SEARCH_DEPTH,
 )
 from utils.helpers import (
     extract_domain,
@@ -33,8 +37,75 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Initialize LangChain DuckDuckGo tool
-ddg_search = DuckDuckGoSearchRun()
+
+def _run_async(coro):
+    """Run async coroutine in a separate thread to avoid nested loop issues."""
+    import asyncio
+    import concurrent.futures
+    import sys
+
+    def run_in_thread():
+        # On Windows, ProactorEventLoop is required for subprocess support
+        # (Playwright spawns browser processes via asyncio subprocesses)
+        if sys.platform == "win32":
+            loop = asyncio.ProactorEventLoop()
+        else:
+            loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(run_in_thread)
+        return future.result()
+
+
+_EXCLUDED_COMPETITOR_DOMAINS = {
+    "booking.com",
+    "www.booking.com",
+    "similarweb.com",
+    "www.similarweb.com",
+    "owler.com",
+    "www.owler.com",
+    "tracxn.com",
+    "www.tracxn.com",
+    "wikipedia.org",
+    "www.wikipedia.org",
+    "crunchbase.com",
+    "www.crunchbase.com",
+    "linkedin.com",
+    "www.linkedin.com",
+}
+
+_EXCLUDED_DOMAIN_SUFFIXES = (
+    ".vercel.app",
+    ".netlify.app",
+    ".pages.dev",
+    ".webflow.io",
+    ".notion.site",
+)
+
+_EXCLUDED_URL_FRAGMENTS = (
+    "booking.com/hotel",
+    "/hotel/",
+    "/wiki/",
+    "/company/",
+    "/website/",
+    "/alternatives/",
+    "/competitors/",
+)
+
+_COMPETITOR_LISTING_DOMAINS = (
+    "tracxn.com",
+    "owler.com",
+    "similarweb.com",
+    "ahrefs.com",
+    "growjo.com",
+    "craft.co",
+    "cbinsights.com",
+)
 
 
 def _get_base_domain(domain: str) -> str:
@@ -43,6 +114,162 @@ def _get_base_domain(domain: str) -> str:
     if len(parts) >= 2:
         return ".".join(parts[-2:])
     return domain.lower()
+
+
+def _is_excluded_candidate_domain(domain: str, url: str = "") -> bool:
+    """Reject non-brand destinations such as aggregators, previews, and listings."""
+    domain = (domain or "").strip().lower()
+    url = (url or "").strip().lower()
+    if not domain:
+        return True
+    if domain in _EXCLUDED_COMPETITOR_DOMAINS:
+        return True
+    if any(domain.endswith(suffix) for suffix in _EXCLUDED_DOMAIN_SUFFIXES):
+        return True
+    if any(fragment in url for fragment in _EXCLUDED_URL_FRAGMENTS):
+        return True
+    return False
+
+
+def _filter_candidate_pool(candidates: list[dict], source_domain: str) -> list[dict]:
+    """Normalize, filter, and deduplicate candidate competitors."""
+    filtered: list[dict] = []
+    seen_names: set[str] = set()
+    seen_base_domains: set[str] = set()
+    source_base = _get_base_domain(source_domain)
+
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+
+        name = (candidate.get("name") or "").strip()
+        url = (candidate.get("url") or "").strip()
+        domain = (candidate.get("domain") or extract_domain(url) or "").strip().lower()
+        if not name or not domain:
+            continue
+        if _is_excluded_candidate_domain(domain, url):
+            continue
+
+        base_domain = _get_base_domain(domain)
+        name_key = name.lower()
+        if base_domain == source_base or base_domain in seen_base_domains:
+            continue
+        if name_key in seen_names:
+            continue
+
+        normalized = dict(candidate)
+        normalized["domain"] = domain
+        normalized["url"] = url if url.startswith("http") else f"https://{domain}"
+
+        seen_names.add(name_key)
+        seen_base_domains.add(base_domain)
+        filtered.append(normalized)
+
+    return filtered
+
+
+def _is_competitor_listing_page(url: str, title: str = "") -> bool:
+    """Heuristic for pages likely to list competitors or alternatives."""
+    haystack = f"{url} {title}".lower()
+    return any(domain in haystack for domain in _COMPETITOR_LISTING_DOMAINS) or any(
+        token in haystack
+        for token in (
+            " competitor",
+            " competitors",
+            " alternative",
+            " alternatives",
+            " similar companies",
+            " similar brands",
+        )
+    )
+
+
+def _normalize_company_name(name: str) -> str:
+    """Normalize noisy extracted company names from listing pages."""
+    name = re.sub(r"\s+", " ", (name or "")).strip()
+    name = re.sub(
+        r"^(compare|view|visit|get|see|read|explore|top|best|vs|and|or)\s+",
+        "",
+        name,
+        flags=re.I,
+    )
+    name = re.sub(
+        r"\s+(competitors?|alternatives?|website|reviews?)$", "", name, flags=re.I
+    )
+    return name.strip(" -|:;,")
+
+
+def _looks_like_company_name(name: str, source_brand: str) -> bool:
+    """Filter generic text and keep likely company/brand names."""
+    if not name:
+        return False
+    lowered = name.lower()
+    if lowered == source_brand.lower():
+        return False
+    if lowered in {"and", "or", "the", "a", "an", "with", "view all", "compare"}:
+        return False
+    if len(name) < 2 or len(name) > 60:
+        return False
+    if not re.search(r"[A-Za-z]", name):
+        return False
+    if len(name.split()) > 6:
+        return False
+    blocked_terms = (
+        "competitor",
+        "alternative",
+        "compare",
+        "similar companies",
+        "pricing",
+        "founded",
+        "employees",
+        "funding",
+        "revenue",
+        "overview",
+        "industry",
+    )
+    if any(term in lowered for term in blocked_terms):
+        return False
+    return True
+
+
+def _tavily_search(query: str, max_results: int = 5) -> list[dict]:
+    """Search the web via Tavily and normalize the response shape."""
+    if not TAVILY_API_KEY:
+        logger.warning("TAVILY_API_KEY not configured, skipping Tavily search")
+        return []
+
+    try:
+        response = requests.post(
+            "https://api.tavily.com/search",
+            json={
+                "api_key": TAVILY_API_KEY,
+                "query": query,
+                "search_depth": TAVILY_SEARCH_DEPTH,
+                "max_results": max_results,
+                "include_answer": False,
+                "include_raw_content": False,
+            },
+            timeout=30,
+        )
+        response.raise_for_status()
+        payload = response.json()
+    except Exception as e:
+        logger.warning("Tavily search failed for '%s': %s", query, e)
+        return []
+
+    normalized = []
+    for item in payload.get("results", []):
+        url = item.get("url", "")
+        if not url:
+            continue
+        normalized.append(
+            {
+                "href": url,
+                "title": item.get("title", ""),
+                "body": item.get("content", ""),
+            }
+        )
+    return normalized
 
 
 # Country code TLD mapping for geographic detection
@@ -134,6 +361,7 @@ STRICT EXCLUSION RULES — DO NOT return any company that:
 - Targets a DIFFERENT customer segment (e.g., women's clothing when the source targets men)
 - Sells fundamentally different products/services even if the brand name sounds similar
 - Is primarily a marketplace/aggregator unless the source company is also one
+- Is a preview, booking, listing, directory, travel, or analytics domain rather than an official brand website
 
 For each competitor, provide:
 - name: Company/brand name
@@ -188,7 +416,7 @@ def discover_competitors(
     scope: str = "global",
 ) -> list[dict]:
     """
-    Discover and rank competitors using DuckDuckGo search first,
+    Discover and rank competitors using web search first,
     then validate and refine with LLM.
 
     Args:
@@ -207,7 +435,7 @@ def discover_competitors(
     # Store all candidate sources
     all_candidates = []
     tracxn_competitors = []
-    ddg_competitors = []
+    search_competitors = []
 
     # ── Step 1: Tracxn Search (LOCAL ONLY) ─────────────────────────────────────
     if scope == "local":
@@ -223,22 +451,22 @@ def discover_competitors(
                 "Tracxn discovered %d local candidates", len(tracxn_competitors)
             )
         else:
-            logger.info("Tracxn found 0 local candidates, falling back to DDG")
+            logger.info("Tracxn found 0 local candidates, falling back to Tavily")
 
-    # ── Step 2: DuckDuckGo Search ─────────────────────────────────────────────
-    logger.info("Discovering %s competitors via DuckDuckGo...", scope)
-    ddg_competitors = _discover_via_duckduckgo(
+    # ── Step 2: Tavily Search ─────────────────────────────────────────────────
+    logger.info("Discovering %s competitors via Tavily...", scope)
+    search_competitors = _discover_via_tavily(
         business_profile,
         source_domain,
         scope,
     )
-    if ddg_competitors:
-        all_candidates.extend(ddg_competitors)
+    if search_competitors:
+        all_candidates.extend(search_competitors)
         logger.info(
-            "DuckDuckGo discovered %d %s candidates", len(ddg_competitors), scope
+            "Tavily discovered %d %s candidates", len(search_competitors), scope
         )
 
-    # ── Step 3: LLM Fallback (if Tracxn/DDG fail OR < 5 total candidates) ──────
+    # ── Step 3: LLM Fallback (if Tracxn/Tavily fail OR < 5 total candidates) ───
     if not all_candidates or (len(all_candidates) < 5):
         logger.info("Insufficient candidates, using LLM discovery fallback...")
         llm_fallback = _discover_via_llm(
@@ -249,11 +477,13 @@ def discover_competitors(
             scope,
         )
         all_candidates.extend(llm_fallback)
+        all_candidates = _filter_candidate_pool(all_candidates, source_domain)
         logger.info(
             "LLM fallback discovered %d %s candidates", len(llm_fallback), scope
         )
 
     # ── LLM Validation: Validate all candidates ─────────────────────────────
+    all_candidates = _filter_candidate_pool(all_candidates, source_domain)
     logger.info("Validating %s competitors via LLM...", scope)
     llm_validated, needs_fallback = _validate_via_llm(
         business_profile,
@@ -276,6 +506,7 @@ def discover_competitors(
         )
         if llm_fallback:
             all_candidates.extend(llm_fallback)
+            all_candidates = _filter_candidate_pool(all_candidates, source_domain)
             logger.info(
                 "LLM fallback discovered %d %s candidates", len(llm_fallback), scope
             )
@@ -370,7 +601,11 @@ def _discover_via_llm(
                 continue
 
             domain = extract_domain(url)
-            if not domain or domain == source_domain:
+            if (
+                not domain
+                or domain == source_domain
+                or _is_excluded_candidate_domain(domain, url)
+            ):
                 continue
 
             # Deduplicate by normalized name and base domain
@@ -406,13 +641,13 @@ def _validate_via_llm(
     profile: dict,
     source_url: str,
     source_domain: str,
-    ddg_candidates: list[dict],
+    search_candidates: list[dict],
     scope: str = "global",
 ) -> tuple[list[dict], bool]:
     """
-    Use LLM to validate, refine, and enrich DuckDuckGo search results.
+    Use LLM to validate, refine, and enrich search results.
 
-    Takes DDG candidates and uses LLM to:
+    Takes search candidates and uses LLM to:
     - Validate relevance
     - Extract/confirm business details
     - Add reasoning and similarity scores
@@ -422,29 +657,29 @@ def _validate_via_llm(
         profile: Business profile of the source company.
         source_url: URL of the source company.
         source_domain: Domain of the source company.
-        ddg_candidates: List of competitor dicts from DuckDuckGo.
+        search_candidates: List of candidate competitor dictionaries from web search.
         scope: "local" or "global" scope.
 
     Returns:
         Tuple of (validated competitor dictionaries, needs_fallback flag).
         needs_fallback is True if validation found <3 valid competitors or >50% are invalid.
     """
-    if not ddg_candidates:
+    if not search_candidates:
         return [], False
 
     try:
         country_hint = _detect_country(source_url, source_domain, profile)
         scope_instruction = _SCOPE_INSTRUCTIONS.get(scope, "")
 
-        # Build a query prompt that asks LLM to validate the DDG candidates
+        # Build a prompt that asks the LLM to validate the search candidates
         candidates_text = "\n".join(
             [
                 f"- {c.get('name', 'Unknown')} ({c.get('domain', 'unknown')})"
-                for c in ddg_candidates[:15]  # Limit to top 15 candidates
+                for c in search_candidates[:15]  # Limit to top 15 candidates
             ]
         )
 
-        prompt = f"""You are a competitive intelligence analyst. Analyze these DuckDuckGo search results and determine which are VALID competitors for the source brand.
+        prompt = f"""You are a competitive intelligence analyst. Analyze these web search results and determine which are VALID competitors for the source brand.
 
 BUSINESS PROFILE:
 {json.dumps(profile, indent=2)[:3000]}
@@ -453,7 +688,7 @@ SOURCE COMPANY URL: {source_url}
 {country_hint}
 {scope_instruction}
 
-DUCKDUCKGO SEARCH RESULTS:
+SEARCH RESULTS:
 {candidates_text}
 
 CRITICAL REJECTION RULES - REJECT candidates if they are:
@@ -463,6 +698,7 @@ CRITICAL REJECTION RULES - REJECT candidates if they are:
 - GENERIC information domains (skincare.com, beauty.com, wellness.com - too broad, not a real brand)
 - CLINICS / HOSPITALS (unless they sell consumer products in your niche)
 - ANY site that is NOT a company selling products/services similar to source
+- PREVIEW / LISTING / TRAVEL / ANALYTICS domains (vercel previews, Booking.com listings, Similarweb, Owler, etc.)
 
 For EACH candidate above, determine:
 1. Is this a VALID competitor (SAME industry, SAME niche products, SAME target customer)?
@@ -503,9 +739,9 @@ IMPORTANT:
 
         if not isinstance(result, list):
             logger.warning("LLM validation returned non-list: %s", text[:200])
-            return ddg_candidates[
+            return search_candidates[
                 :10
-            ], True  # Fallback to top DDG results + trigger fallback
+            ], True  # Fallback to top search results + trigger fallback
 
         # Process validated results
         validated = []
@@ -519,7 +755,11 @@ IMPORTANT:
                 continue
 
             domain = extract_domain(url)
-            if not domain or domain == source_domain:
+            if (
+                not domain
+                or domain == source_domain
+                or _is_excluded_candidate_domain(domain, url)
+            ):
                 continue
 
             # Only keep relevant candidates
@@ -541,28 +781,28 @@ IMPORTANT:
             )
 
         logger.info(
-            "LLM validated %d out of %d DDG candidates",
+            "LLM validated %d out of %d search candidates",
             len(validated),
-            len(ddg_candidates),
+            len(search_candidates),
         )
 
         # Determine if we need fallback
-        invalid_count = len(ddg_candidates) - len(validated)
-        needs_fallback = len(validated) < 3 or invalid_count > len(validated)
+        invalid_count = len(search_candidates) - len(validated)
+        needs_fallback = len(validated) < 3
 
         return validated, needs_fallback
     except Exception as e:
         logger.warning("LLM validation failed: %s", e)
-        # Fallback: return top DDG candidates and trigger fallback
-        return ddg_candidates[:10], True
+        # Fallback: return top search candidates and trigger fallback
+        return search_candidates[:10], True
 
 
-def _generate_ddg_queries(
+def _generate_search_queries(
     profile: dict,
     scope: str = "global",
 ) -> list[str]:
     """
-    Use LLM to generate dynamic DuckDuckGo search queries based on brand features.
+    Use LLM to generate dynamic web search queries based on brand features.
 
     Args:
         profile: Business profile dictionary.
@@ -575,7 +815,7 @@ def _generate_ddg_queries(
         # Select scope-specific instruction
         scope_instruction = _SCOPE_INSTRUCTIONS.get(scope, "")
 
-        prompt = f"""You are a competitive intelligence researcher. Based on the brand profile below, generate {5 if scope == "local" else 4} effective DuckDuckGo search queries to find competitors.
+        prompt = f"""You are a competitive intelligence researcher. Based on the brand profile below, generate {5 if scope == "local" else 4} effective web search queries to find competitors.
 
 BRAND PROFILE:
 {json.dumps(profile, indent=2)[:3000]}
@@ -685,9 +925,9 @@ def _fallback_queries(profile: dict, scope: str) -> list[str]:
     return queries[:5]
 
 
-def _simple_ddg_queries(profile: dict, scope: str) -> list[str]:
+def _simple_search_queries(profile: dict, scope: str) -> list[str]:
     """
-    Generate simple, hardcoded DuckDuckGo search queries.
+    Generate simple, hardcoded web search queries.
     Uses basic brand + industry patterns without LLM involvement.
     """
     brand_name = profile.get("brand_name", "")
@@ -726,7 +966,7 @@ def _simple_ddg_queries(profile: dict, scope: str) -> list[str]:
         queries.append(f"best {industry} brands {geo_suffix}")
 
     logger.info(
-        "Generated %d simple DDG queries for %s %s",
+        "Generated %d simple search queries for %s %s",
         len(queries),
         brand_name or "unknown",
         scope,
@@ -734,122 +974,114 @@ def _simple_ddg_queries(profile: dict, scope: str) -> list[str]:
     return queries[:5]
 
 
-def _discover_via_duckduckgo(
+def _discover_via_tavily(
     profile: dict,
     source_domain: str,
     scope: str = "global",
 ) -> list[dict]:
     """
-    DuckDuckGo search for competitors.
+    Tavily search for competitors.
 
     For GLOBAL scope: finds competitor listing pages and extracts competitors
     For LOCAL scope: also does the same (can be used as fallback after Tracxn)
     """
     brand_name = profile.get("brand_name", "")
     if not brand_name:
-        logger.warning("No brand name found for DDG search")
+        logger.warning("No brand name found for Tavily search")
         return []
 
-    try:
-        import ddgs
-    except ImportError:
-        logger.warning("duckduckgo_search not installed, skipping DDG discovery")
-        return []
-
-    # Search for competitor listing pages
+    generated_queries = _generate_search_queries(profile, scope)
+    listing_queries = []
     if scope == "local":
-        # For local, search for Tracxn or competitor pages with India context
-        queries = [
-            f"tracxn {brand_name} competitors India",
-            f"{brand_name} competitors India",
-            f"best {brand_name} alternatives India",
+        listing_queries = [
+            f'site:tracxn.com "{brand_name}" competitors India',
+            f'site:growjo.com "{brand_name}" competitors India',
+            f'site:similarweb.com "{brand_name}" competitors India',
         ]
     else:
-        # For global, search for Tracxn or general competitor pages
-        queries = [
-            f"tracxn {brand_name} competitors",
-            f"{brand_name} competitors",
-            f"best {brand_name} alternatives",
+        listing_queries = [
+            f'site:similarweb.com "{brand_name}" competitors',
+            f'site:ahrefs.com "{brand_name}" competitors',
+            f'site:growjo.com "{brand_name}" competitors',
         ]
+    queries = list(dict.fromkeys(listing_queries + generated_queries))
 
     logger.info(
-        "DDG search queries for %s %s: %s",
+        "Tavily search queries for %s %s: %s",
         brand_name,
         scope,
         queries,
     )
 
     try:
-        ddgs_instance = ddgs.DDGS()
+        listing_pages: list[str] = []
+        seen_listing_pages: set[str] = set()
+
         for query in queries:
             try:
-                results = list(ddgs_instance.text(query, max_results=5))
+                results = _tavily_search(query, max_results=8)
 
-                # Find the first relevant competitor listing page
                 for result in results:
                     href = result.get("href", "")
                     title = result.get("title", "").lower()
-
-                    # Look for Tracxn or competitor listing pages
-                    is_competitor_listing = (
-                        "tracxn.com" in href
-                        or "similarweb.com/website" in href
-                        or "owler.com" in href
-                        or "competitor" in title
-                        or "alternative" in title
-                        or "similar companies" in title
-                    )
-
-                    if is_competitor_listing:
-                        logger.info("Found competitor listing page: %s", href)
-
-                        # Crawl the page and extract competitors
-                        competitors = _crawl_and_extract_competitors(
-                            href, brand_name, scope
-                        )
-
-                        # If we found competitors, return them
-                        if competitors:
-                            # Try to find websites for each competitor
-                            for comp in competitors:
-                                if comp.get("name"):
-                                    website_url, domain = _find_company_website(
-                                        comp["name"]
-                                    )
-                                    if website_url:
-                                        comp["url"] = website_url
-                                        comp["domain"] = domain
-
-                            # Filter out competitors without valid domains
-                            competitors = [c for c in competitors if c.get("domain")]
-
-                            if competitors:
-                                logger.info(
-                                    "Extracted %d competitors from %s",
-                                    len(competitors),
-                                    href,
-                                )
-                                return competitors
-
-                        # If crawling didn't yield results, continue to next result
+                    if not href or href in seen_listing_pages:
                         continue
+                    if _is_competitor_listing_page(href, title):
+                        seen_listing_pages.add(href)
+                        listing_pages.append(href)
+                        logger.info("Queued competitor listing page: %s", href)
+                        if len(listing_pages) >= 5:
+                            break
+
+                if len(listing_pages) >= 5:
+                    break
 
                 time.sleep(SEARCH_RATE_LIMIT_DELAY)
 
             except Exception as e:
                 err_str = str(e).lower()
                 if "ratelimit" in err_str or "202" in err_str or "429" in err_str:
-                    logger.warning("DDG rate limited on '%s': %s", query, e)
+                    logger.warning("Tavily rate limited on '%s': %s", query, e)
                     break
-                logger.warning("DDG search failed for '%s': %s", query, e)
+                logger.warning("Tavily search failed for '%s': %s", query, e)
 
             time.sleep(SEARCH_RATE_LIMIT_DELAY)
 
     except Exception as e:
-        logger.warning("Failed to create DDG session: %s", e)
+        logger.warning("Failed to initialize Tavily search flow: %s", e)
         return []
 
-    logger.info("No competitor listing pages found via DDG for %s", brand_name)
+    aggregated_competitors: list[dict] = []
+    seen_names: set[str] = set()
+    for href in listing_pages:
+        competitors = _crawl_and_extract_competitors(href, brand_name, scope)
+        if competitors:
+            for competitor in competitors:
+                name_key = (competitor.get("name") or "").strip().lower()
+                if name_key and name_key not in seen_names:
+                    seen_names.add(name_key)
+                    aggregated_competitors.append(competitor)
+
+    for comp in aggregated_competitors:
+        if comp.get("name") and not comp.get("domain"):
+            website_url, domain = _find_company_website(comp["name"])
+            if website_url:
+                comp["url"] = website_url
+                comp["domain"] = domain
+
+    aggregated_competitors = _filter_candidate_pool(
+        aggregated_competitors, source_domain
+    )
+    if aggregated_competitors:
+        logger.info(
+            "Resolved %d competitors from %d listing pages for %s",
+            len(aggregated_competitors),
+            len(listing_pages),
+            brand_name,
+        )
+        return aggregated_competitors
+
+    logger.info("No competitor listing pages found via Tavily for %s", brand_name)
     return []
 
 
@@ -861,7 +1093,7 @@ def _discover_via_tracxn(
     """
     Discover competitors via Tracxn platform.
 
-    Uses DDG to find tracxn.com page for the brand, then extracts
+    Uses Tavily to find tracxn.com page for the brand, then extracts
     competitors and alternatives from the Tracxn profile.
 
     Args:
@@ -882,19 +1114,18 @@ def _discover_via_tracxn(
         logger.warning("No brand name found for Tracxn search")
         return []
 
-    try:
-        import ddgs
-    except ImportError:
-        logger.warning("duckduckgo_search not installed, skipping Tracxn discovery")
+    if not TAVILY_API_KEY:
+        logger.warning("TAVILY_API_KEY not configured, skipping Tracxn discovery")
         return []
 
     # Search for Tracxn page - more specific query
-    tracxn_query = f'tracxn "{brand_name}" company profile'
+    tracxn_query = (
+        f'site:tracxn.com "{brand_name}" competitors OR alternatives OR company profile'
+    )
     logger.info("Searching Tracxn for %s (query: %s)", brand_name, tracxn_query)
 
     try:
-        ddgs_instance = ddgs.DDGS()
-        results = list(ddgs_instance.text(tracxn_query, max_results=10))
+        results = _tavily_search(tracxn_query, max_results=10)
 
         # Find the first tracxn.com result (but not login page)
         tracxn_url = None
@@ -921,7 +1152,12 @@ def _discover_via_tracxn(
                     comp["domain"] = domain
 
         # Filter out competitors without valid domains
-        competitors = [c for c in competitors if c.get("domain")]
+        competitors = [
+            c
+            for c in competitors
+            if c.get("domain")
+            and not _is_excluded_candidate_domain(c.get("domain", ""), c.get("url", ""))
+        ]
 
         return competitors
     except Exception as e:
@@ -989,6 +1225,52 @@ def _extract_competitors_from_tracxn(
     return competitors
 
 
+_NON_BRAND_DOMAINS = {
+    # Design / awards / portfolio sites
+    "awwwards.com", "www.awwwards.com",
+    "dribbble.com", "www.dribbble.com",
+    "behance.net", "www.behance.net",
+    "deviantart.com",
+    # Developer / platform / hosting sites
+    "developers.google.com", "developer.apple.com",
+    "github.com", "www.github.com",
+    "gitlab.com",
+    "stackoverflow.com", "www.stackoverflow.com",
+    # Website builders / SaaS platforms (not brands selling products)
+    "wix.com", "www.wix.com",
+    "wordpress.com", "www.wordpress.com",
+    "wordpress.org",
+    "shopify.com", "www.shopify.com",
+    "squarespace.com", "www.squarespace.com",
+    "webflow.com", "www.webflow.com",
+    "godaddy.com", "www.godaddy.com",
+    "notion.so", "notion.site",
+    "vercel.com", "www.vercel.com",
+    "netlify.com", "www.netlify.com",
+    # Documentation / tools sites
+    "readthedocs.io",
+    "docs.google.com",
+    "multicollab.com", "docs.multicollab.com",
+    "realstack.com",
+    # Art / niche / unrelated sites
+    "streetartcities.com",
+    "deepdive.headline.com",
+    # Social / media
+    "reddit.com", "www.reddit.com",
+    "pinterest.com", "www.pinterest.com",
+    "tumblr.com",
+    "tiktok.com", "www.tiktok.com",
+    "youtube.com", "www.youtube.com",
+    "twitch.tv",
+    # Marketplaces / aggregators (already in _EXCLUDED but reinforce)
+    "amazon.com", "amazon.in", "www.amazon.com", "www.amazon.in",
+    "ebay.com", "www.ebay.com",
+    "etsy.com", "www.etsy.com",
+    "alibaba.com", "aliexpress.com",
+    "flipkart.com", "www.flipkart.com",
+}
+
+
 def _is_relevant_domain(domain: str) -> bool:
     """
     Quick filter to reject obviously non-relevant domains.
@@ -999,10 +1281,14 @@ def _is_relevant_domain(domain: str) -> bool:
 
     domain_lower = domain.lower()
 
+    # Check against hardcoded non-brand domains
+    if domain_lower in _NON_BRAND_DOMAINS:
+        return False
+
     # Reject news sites
     if any(
         x in domain_lower
-        for x in ["news", "times", "herald", "post", "gazette", "zeenews", "india"]
+        for x in ["news", "times", "herald", "post", "gazette", "zeenews"]
     ):
         return False
 
@@ -1015,6 +1301,10 @@ def _is_relevant_domain(domain: str) -> bool:
 
     # Reject blog sites
     if any(x in domain_lower for x in ["blog", "medium", "blogger"]):
+        return False
+
+    # Reject docs.* subdomains
+    if domain_lower.startswith("docs.") or domain_lower.startswith("developers."):
         return False
 
     # Reject generic one-word .com/.in domains (too generic - not real brands)
@@ -1040,7 +1330,14 @@ def _crawl_and_extract_competitors(
     scope: str,
 ) -> list[dict]:
     """
-    Crawl a page and extract competitor names from "Competitors" or "Alternatives" sections.
+    Crawl a page and extract competitor names AND their website URLs
+    from "Competitors" or "Alternatives" sections.
+
+    On listing pages (Tracxn, etc.), competitor entries often have anchor
+    links that point to either:
+      - The competitor's Tracxn profile (internal link)
+      - The competitor's actual website (external link)
+    We extract both the name and any external website URL found nearby.
 
     Args:
         page_url: URL of the page to crawl
@@ -1048,86 +1345,171 @@ def _crawl_and_extract_competitors(
         scope: "local" or "global" scope
 
     Returns:
-        List of competitor dictionaries with names (domains will be resolved later)
+        List of competitor dictionaries with names and optional URLs/domains.
     """
     from crawler.crawler import AdaptiveCrawler
-    import asyncio
-    import sys
-    import re
 
     try:
-        crawler = AdaptiveCrawler(max_pages=1, max_depth=1)
-
-        # Use asyncio.run() which handles event loop properly
-        try:
-            pages = asyncio.run(crawler.crawl(page_url))
-        except RuntimeError:
-            # Fallback for nested loops on Windows
-            try:
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
-                pages = loop.run_until_complete(crawler.crawl(page_url))
-                loop.close()
-            except Exception as nested_error:
-                logger.warning("Nested loop fallback also failed: %s", nested_error)
-                return []
+        crawler = AdaptiveCrawler(max_pages=1, max_depth=0)
+        pages = _run_async(crawler.crawl(page_url))
 
         if not pages:
             logger.warning("Failed to crawl page: %s", page_url)
             return []
 
-        # Extract text from page
         page_text = "\n".join(
             [p.cleaned_text if hasattr(p, "cleaned_text") else str(p) for p in pages]
         )
+        raw_html = "\n".join(
+            [p.raw_html if hasattr(p, "raw_html") else "" for p in pages]
+        )
 
-        # Extract competitor names from "Competitors" or "Alternatives" sections
         competitors = []
         seen = set()
 
-        # Patterns to look for competitor sections
+        def add_candidate(
+            candidate_name: str, snippet: str,
+            website_url: str = "", website_domain: str = "",
+        ) -> None:
+            normalized = _normalize_company_name(candidate_name)
+            if not _looks_like_company_name(normalized, brand_name):
+                return
+            name_key = normalized.lower()
+            if name_key in seen:
+                # If we already have this candidate but now found a website, update it
+                if website_url:
+                    for comp in competitors:
+                        if comp.get("name", "").lower() == name_key and not comp.get("domain"):
+                            comp["url"] = website_url
+                            comp["domain"] = website_domain
+                return
+            seen.add(name_key)
+            competitors.append(
+                {
+                    "domain": website_domain,
+                    "url": website_url,
+                    "name": normalized,
+                    "frequency": 4,
+                    "snippets": [snippet],
+                    "titles": [normalized],
+                    "llm_similarity": 0.7,
+                    "semantic_score": 0.7,
+                }
+            )
+
+        # ── Parse HTML for competitor entries ─────────────────────────────
+        listing_domain = urlparse(page_url).netloc.lower()
+        is_listing_site = any(
+            d in listing_domain for d in _COMPETITOR_LISTING_DOMAINS
+        )
+
+        try:
+            soup = BeautifulSoup(raw_html, "html.parser")
+
+            if is_listing_site:
+                # On listing sites (Tracxn, etc.), look for anchor links that
+                # point to company profiles or external websites.
+                # Build a map: competitor_name -> external_website_url
+                name_to_website: dict[str, tuple[str, str]] = {}
+
+                for anchor in soup.find_all("a", href=True):
+                    href = anchor.get("href", "").strip()
+                    anchor_text = " ".join(anchor.get_text(" ", strip=True).split())
+                    if len(anchor_text) < 2 or len(anchor_text) > 60:
+                        continue
+
+                    parsed = urlparse(href)
+                    href_domain = (parsed.netloc or "").lower()
+                    href_lower = href.lower()
+
+                    # Case 1: Link points to an external website (the competitor's site)
+                    if (
+                        href.startswith("http")
+                        and href_domain
+                        and listing_domain not in href_domain
+                        and not _is_excluded_candidate_domain(href_domain, href)
+                        and _is_relevant_domain(href_domain)
+                    ):
+                        name_to_website[anchor_text.lower()] = (href, href_domain)
+
+                    # Case 2: Internal profile link (e.g., /d/companies/bewakoof/...)
+                    if any(
+                        token in href_lower
+                        for token in ("/company", "/companies", "/d/companies", "/profile")
+                    ):
+                        add_candidate(
+                            anchor_text,
+                            f"Found via listing page link: {page_url}",
+                        )
+
+                # Now try to match extracted names to any external URLs found on the page
+                for comp in competitors:
+                    if comp.get("domain"):
+                        continue  # Already has a website
+                    name_lower = comp.get("name", "").lower()
+                    for text_key, (url, domain) in name_to_website.items():
+                        # Fuzzy match: name appears in anchor text or vice versa
+                        if name_lower in text_key or text_key in name_lower:
+                            comp["url"] = url
+                            comp["domain"] = domain
+                            break
+
+            else:
+                # Non-listing page: original anchor-based extraction
+                for anchor in soup.find_all("a", href=True):
+                    href = anchor.get("href", "")
+                    anchor_text = " ".join(anchor.get_text(" ", strip=True).split())
+                    if len(anchor_text) < 2:
+                        continue
+                    if _is_competitor_listing_page(page_url, anchor_text):
+                        add_candidate(
+                            anchor_text, f"Found via listing page link: {page_url}"
+                        )
+        except Exception as e:
+            logger.debug(
+                "Anchor-based competitor extraction failed for %s: %s", page_url, e
+            )
+
+        # ── Text-pattern extraction ───────────────────────────────────────
         patterns = [
             r"Competitors?\s*[:\-]\s*([^\n]+)",
             r"Alternatives?\s*[:\-]\s*([^\n]+)",
             r"similar companies?\s*[:\-]\s*([^\n]+)",
-            r"companies like\s+([\w\s,]+)",  # Pattern for Tracxn: "companies like X, Y, Z"
+            r"companies like\s+([^\n]+)",
         ]
-
         for pattern in patterns:
             matches = re.findall(pattern, page_text, re.IGNORECASE)
             for match in matches:
-                # Split by comma, semicolon, or "and"
                 parts = re.split(r"[,;]|\band\b", match)
                 for part in parts:
-                    name = part.strip()
-                    # Clean up the name - remove extra spaces and special chars
-                    name = re.sub(r"[^a-zA-Z0-9\s\-&]", "", name).strip()
-                    # Remove words that are too short or common
-                    if (
-                        len(name) > 2
-                        and name.lower() != brand_name.lower()
-                        and name.lower() not in ["and", "or", "the", "a", "an", "with"]
-                        and name not in seen
-                    ):
-                        seen.add(name)
-                        competitors.append(
-                            {
-                                "domain": "",  # Will be resolved later
-                                "url": "",
-                                "name": name,
-                                "frequency": 4,  # Tracxn/DDG results get high frequency boost
-                                "snippets": [f"Found via crawl: {page_url}"],
-                                "titles": [name],
-                                "llm_similarity": 0.7,
-                                "semantic_score": 0.7,
-                            }
+                    add_candidate(part, f"Found via text pattern on {page_url}")
+
+        # ── Tracxn-specific: capture short lines after competitor heading ─
+        if "tracxn.com" in page_url.lower():
+            lines = [line.strip() for line in page_text.splitlines() if line.strip()]
+            for idx, line in enumerate(lines):
+                if re.search(
+                    r"competitors?|alternatives?|similar companies?", line, re.I
+                ):
+                    for neighbor in lines[idx + 1 : idx + 15]:
+                        if re.search(
+                            r"funding|revenue|employees|founded|hq|overview",
+                            neighbor,
+                            re.I,
+                        ):
+                            continue
+                        add_candidate(
+                            neighbor, f"Found near competitor heading on {page_url}"
                         )
 
+        competitors = competitors[:12]
+
         logger.info(
-            "Extracted %d competitors from %s for %s",
+            "Extracted %d competitors from %s for %s (with websites: %d)",
             len(competitors),
             page_url,
             brand_name,
+            sum(1 for c in competitors if c.get("domain")),
         )
         return competitors
     except Exception as e:
@@ -1137,7 +1519,7 @@ def _crawl_and_extract_competitors(
 
 def _find_company_website(company_name: str) -> tuple[str, str]:
     """
-    Find the official website for a company name using DDG search.
+    Find the official website for a company name using Tavily search.
 
     Args:
         company_name: Name of the company to find
@@ -1145,23 +1527,23 @@ def _find_company_website(company_name: str) -> tuple[str, str]:
     Returns:
         Tuple of (website_url, domain), or empty strings if not found
     """
-    try:
-        import ddgs
-    except ImportError:
-        logger.warning("duckduckgo_search not installed, skipping website search")
+    if not TAVILY_API_KEY:
+        logger.warning("TAVILY_API_KEY not configured, skipping website search")
         return "", ""
 
     try:
-        ddgs_instance = ddgs.DDGS()
         # Search for company name + "official website"
         query = f'"{company_name}" official website'
-        results = list(ddgs_instance.text(query, max_results=5))
+        results = _tavily_search(query, max_results=10)
 
         for result in results:
             href = result.get("href", "")
             if href and "http" in href:
-                # Try to find a company website (not social media, not wiki)
-                if not any(
+                domain = extract_domain(href)
+                if not domain:
+                    continue
+                # Reject social media, excluded domains, and non-brand domains
+                if any(
                     x in href
                     for x in [
                         "facebook.com",
@@ -1172,13 +1554,18 @@ def _find_company_website(company_name: str) -> tuple[str, str]:
                         "quora.com",
                     ]
                 ):
-                    return href, href.replace("https://", "").replace(
-                        "http://", ""
-                    ).split("/")[0]
+                    continue
+                if _is_excluded_candidate_domain(domain, href):
+                    continue
+                if not _is_relevant_domain(domain):
+                    continue
+                return href, href.replace("https://", "").replace(
+                    "http://", ""
+                ).split("/")[0]
 
         # If no official website found, try just the company name
         query = f'"{company_name}"'
-        results = list(ddgs_instance.text(query, max_results=5))
+        results = _tavily_search(query, max_results=10)
 
         for result in results:
             href = result.get("href", "")
@@ -1186,16 +1573,21 @@ def _find_company_website(company_name: str) -> tuple[str, str]:
                 domain = (
                     href.replace("https://", "").replace("http://", "").split("/")[0]
                 )
-                if domain and not any(
-                    x in domain
-                    for x in [
-                        "facebook.com",
-                        "twitter.com",
-                        "instagram.com",
-                        "linkedin.com",
-                        "wikipedia.org",
-                        "quora.com",
-                    ]
+                if (
+                    domain
+                    and not any(
+                        x in domain
+                        for x in [
+                            "facebook.com",
+                            "twitter.com",
+                            "instagram.com",
+                            "linkedin.com",
+                            "wikipedia.org",
+                            "quora.com",
+                        ]
+                    )
+                    and not _is_excluded_candidate_domain(domain, href)
+                    and _is_relevant_domain(domain)
                 ):
                     return href, domain
     except Exception as e:
@@ -1289,19 +1681,25 @@ def _merge_results(
     ddg_candidates: list[dict],
     source_domain: str,
 ) -> list[dict]:
-    """Merge LLM and DDG results, deduplicating by domain and name."""
+    """Merge LLM-validated and search results, deduplicating by domain and name.
+
+    When LLM-validated candidates exist, they are prioritised and raw search
+    candidates are only used to fill gaps.  An additional _is_relevant_domain
+    check prevents non-brand domains from leaking in.
+    """
     seen_base_domains: set[str] = set()
     seen_names: set[str] = set()
     merged: list[dict] = []
 
-    # LLM results first (higher priority)
-    for c in llm_candidates:
+    def _try_add(c: dict) -> bool:
         domain = c.get("domain", "")
         name_key = c.get("name", "").strip().lower()
         base_domain = _get_base_domain(domain) if domain else ""
         if (
             domain
             and domain != source_domain
+            and not _is_excluded_candidate_domain(domain, c.get("url", ""))
+            and _is_relevant_domain(domain)
             and base_domain not in seen_base_domains
             and name_key not in seen_names
         ):
@@ -1309,22 +1707,17 @@ def _merge_results(
             if name_key:
                 seen_names.add(name_key)
             merged.append(c)
+            return True
+        return False
 
-    # Then DDG results
-    for c in ddg_candidates:
-        domain = c.get("domain", "")
-        name_key = c.get("name", "").strip().lower() if c.get("name") else ""
-        base_domain = _get_base_domain(domain) if domain else ""
-        if (
-            domain
-            and domain != source_domain
-            and base_domain not in seen_base_domains
-            and name_key not in seen_names
-        ):
-            seen_base_domains.add(base_domain)
-            if name_key:
-                seen_names.add(name_key)
-            merged.append(c)
+    # LLM-validated results first (higher priority)
+    for c in llm_candidates:
+        _try_add(c)
+
+    # Only add raw search candidates if LLM validation returned very few
+    if len(merged) < 3:
+        for c in ddg_candidates:
+            _try_add(c)
 
     return merged
 
@@ -1446,12 +1839,12 @@ def validate_competitor_relevance(
             )
             return result
 
-        # If parsing fails, assume relevant (fail-open)
+        # If parsing fails, reject rather than silently accepting bad competitors.
         logger.warning(
-            "Could not parse relevance response, assuming relevant: %s", text[:200]
+            "Could not parse relevance response, rejecting candidate: %s", text[:200]
         )
-        return {"relevant": True, "reason": "Could not validate — assumed relevant"}
+        return {"relevant": False, "reason": "Could not validate relevance reliably"}
 
     except Exception as e:
-        logger.warning("Relevance validation failed: %s — assuming relevant", e)
-        return {"relevant": True, "reason": f"Validation error: {e}"}
+        logger.warning("Relevance validation failed: %s — rejecting candidate", e)
+        return {"relevant": False, "reason": f"Validation error: {e}"}

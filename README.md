@@ -2,14 +2,35 @@
 
 ## Project Overview
 
-This project provides automated competitive intelligence analysis for any website. It extracts detailed business profiles, discovers competitors, and generates comprehensive comparative analysis reports.
+This project provides automated competitive intelligence analysis for any website. It extracts structured business profiles, discovers relevant competitors, compares them, and generates customer-facing PDF reports.
 
 ### What It Does
 
 1. **Analyze any website** - Crawls and extracts structured business information
-2. **Find competitors** - Discovers local (India) competitors via Tracxn and global competitors through AI-validated search on market listing platforms
+2. **Find competitors** - Discovers local competitors via Tracxn + Tavily and global competitors via Tavily + LLM validation
 3. **Compare brands** - Performs detailed comparative analysis of market positioning
-4. **Generate reports** - Creates PDF reports with strategic recommendations
+4. **Generate reports** - Creates customer-facing PDF reports with strategic recommendations
+
+### Report Output
+
+The current PDF report includes:
+
+- Executive summary
+- Business profile
+- Visual brand analysis
+- Local competitors
+- Global competitors
+- Competitor deep profiles
+- Side-by-side comparison
+- Strategic threat assessment
+- White space opportunities
+- Strategic recommendations
+
+The PDF report intentionally excludes:
+
+- Website structural analysis
+- CTA aggressiveness
+- Tech stack
 
 ---
 
@@ -21,7 +42,7 @@ URL Input
     v
 +---------------------+
 |  Web Crawler        |  Playwright + BeautifulSoup
-|  (Adaptive BFS)     |  - Crawls up to 15 pages
+|  (Adaptive BFS)     |  - Crawls up to 8 pages by default
 |                     |  - Renders JavaScript
 |                     |  - Captures screenshots
 |                     |  - Retry with exponential backoff
@@ -58,9 +79,10 @@ URL Input
 +------------------------------------------------------+
 |  Competitor Discovery                                |
 |  ──────────────────────────────────────────────────── |
-|  For Local: Tracxn search + crawl competitor pages   |
-|  For Global: DDG search + crawl competitor pages     |
-|  Extract names, find websites, LLM validation       |
+|  For Local: Tracxn + Tavily listing-page discovery   |
+|  For Global: Tavily listing-page discovery           |
+|  Extract names + website URLs directly from HTML     |
+|  LLM validation with hardened domain filtering       |
 +------------------------------------------------------+
                         |
                         v
@@ -130,7 +152,7 @@ URL Input
 |------------|---------|
 | HuggingFace Tokenizers | Tokenize Text |
 | ReportLab | PDF generation |
-| ddgs | DuckDuckGo search |
+| Tavily | Web search and competitor source discovery |
 
 ---
 
@@ -141,20 +163,22 @@ URL Input
 The system uses a multi-stage approach for finding competitors based on scope:
 
 **For Local Competitors (India):**
-- Searches Tracxn platform using DuckDuckGo
-- Crawls Tracxn company profile page
-- Extracts competitor names from "Competitors" and "Alternatives" sections
-- Finds official websites for each competitor
+- Searches Tracxn for the brand's company page
+- Crawls the Tracxn page and extracts competitor names **and website URLs** directly from the page HTML
+- Uses Tavily to discover additional competitor-listing pages (Growjo, Similarweb)
+- For competitors without a website URL, falls back to Tavily website lookup with hardened domain filtering
+- Deduplicates local and global competitors by base domain and name
 
 **For Global Competitors:**
-- Searches competitor listing pages (Tracxn, Similarweb, Owler)
-- Crawls the most relevant listing page
-- Extracts competitor names and finds their websites
+- Uses Tavily to search competitor-listing sources (Similarweb, Ahrefs, Growjo)
+- Crawls multiple relevant listing pages and extracts competitor names + external website links
+- Falls back to LLM discovery if insufficient candidates found
 
 **For Both Scopes:**
-- LLM validates all discovered competitors
-- Rejects news sites, Q&A sites (zhihu, stackexchange), generic domains
-- Falls back to LLM discovery if < 5 valid competitors found
+- LLM validates all discovered competitors; only validated results are used in final ranking
+- Hardened domain filtering rejects 50+ non-brand domain categories (platform sites, design awards, developer portals, SaaS tools, documentation sites, marketplaces, etc.)
+- Runs post-crawl relevance validation via LLM after competitor profile extraction
+- Falls back to LLM-based discovery if < 3 valid competitors found
 
 ### 2. Parallel Competitor Crawling
 
@@ -202,8 +226,9 @@ The system includes automatic fallback to ensure reliability:
 ```env
 GROQ_API_KEY="your_key"
 GROQ_MODEL="openai/gpt-oss-120b"
-GROQ_FALLBACK_MODEL="meta-llama/llama-3.1-70b-instruct"
-HF_API_KEY="hf_xxx"  # For HuggingFace tokenizer
+GROQ_FALLBACK_MODEL="llama-3.3-70b-versatile"
+GROQ_VISION_MODEL="meta-llama/llama-4-scout-17b-16e-instruct"
+TAVILY_API_KEY="tvly-xxx"
 ```
 
 **Result:** Crawler gracefully handles rate-limited sites by waiting and retrying instead of failing immediately.
@@ -219,13 +244,13 @@ HF_API_KEY="hf_xxx"  # For HuggingFace tokenizer
   - Groq (LLM inference)
   - Pinecone (vector database)
   - Jina (embeddings)
-  - DuckDuckGo (search, optional API key)
+  - Tavily (search)
 
 ### Step 1: Clone and Install
 
 ```bash
 # Clone the repository
-cd D:\New folder\Competitor
+cd D:\Competitor
 
 # Install dependencies using uv (recommended)
 uv sync
@@ -241,7 +266,13 @@ Create a `.env` file in the project root:
 ```env
 # Groq API
 GROQ_API_KEY=your_groq_api_key_here
-GROQ_MODEL=meta-llama/llama-3.1-8b-instruct
+GROQ_MODEL=openai/gpt-oss-120b
+GROQ_FALLBACK_MODEL=llama-3.3-70b-versatile
+GROQ_VISION_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
+
+# Tavily Search
+TAVILY_API_KEY=your_tavily_api_key_here
+TAVILY_SEARCH_DEPTH=advanced
 
 # Pinecone
 PINECONE_API_KEY=your_pinecone_api_key_here
@@ -255,6 +286,13 @@ JINA_EMBEDDING_MODEL=jina-embeddings-v5-text-small
 # API Configuration
 API_HOST=0.0.0.0
 API_PORT=8000
+
+# Crawling
+MAX_CRAWL_DEPTH=2
+MAX_PAGES=8
+CRAWL_DELAY_MIN_SECS=2.5
+CRAWL_DELAY_MAX_SECS=4.0
+CRAWL_429_DOMAIN_THRESHOLD=3
 ```
 
 ### Step 3: Initialize Database
@@ -273,6 +311,14 @@ uv run uvicorn api.main:app --host 0.0.0.0 --port 8000 --reload
 **Streamlit Frontend:**
 ```bash
 uv run streamlit run frontend/app.py --server.port 8501
+```
+
+If your shell has broken proxy variables, clear them before starting the services:
+
+```powershell
+$env:HTTP_PROXY=''
+$env:HTTPS_PROXY=''
+$env:ALL_PROXY=''
 ```
 
 ---
@@ -382,7 +428,7 @@ Competitor/
 │   ├── schemas.py                 # API request/response models
 │
 ├── competitor_discovery/
-│   ├── discovery.py               # Competitor discovery with LLM + DDG
+│   ├── discovery.py               # Competitor discovery with Tracxn + Tavily + LLM validation
 │
 ├── crawler/
 │   ├── crawler.py                 # Adaptive BFS web crawler with retry + exponential backoff
@@ -428,8 +474,11 @@ Competitor/
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
 | `GROQ_API_KEY` | Yes | - | Groq API key for LLM |
-| `GROQ_MODEL` | No | `meta-llama/llama-3.1-8b-instruct` | Primary Groq model |
+| `GROQ_MODEL` | No | `meta-llama/llama-3.1-8b-instruct` | Primary Groq model override |
 | `GROQ_FALLBACK_MODEL` | No | `llama-3.3-70b-versatile` | Fallback Groq model |
+| `GROQ_VISION_MODEL` | No | `meta-llama/llama-3.2-11b-vision-preview` | Groq vision model override |
+| `TAVILY_API_KEY` | Yes | - | Tavily API key for search |
+| `TAVILY_SEARCH_DEPTH` | No | `advanced` | Tavily search depth |
 | `PINECONE_API_KEY` | Yes | - | Pinecone API key |
 | `PINECONE_ENVIRONMENT` | No | `us-east-1` | Pinecone environment |
 | `PINECONE_INDEX_NAME` | No | `competitor-intel` | Pinecone index name |
@@ -439,8 +488,11 @@ Competitor/
 | `MAX_COMPETITORS` | No | 5 | Max competitors to analyze |
 | `CHUNK_SIZE` | No | 1200 | Text chunk size (tokens) |
 | `CHUNK_OVERLAP` | No | 200 | Chunk overlap (tokens) |
-| `MAX_PAGES` | No | 15 | Max pages to crawl |
+| `MAX_PAGES` | No | 8 | Max pages to crawl |
 | `MAX_CRAWL_DEPTH` | No | 2 | Max crawl depth |
+| `CRAWL_DELAY_MIN_SECS` | No | 2.5 | Minimum polite crawl delay |
+| `CRAWL_DELAY_MAX_SECS` | No | 4.0 | Maximum polite crawl delay |
+| `CRAWL_429_DOMAIN_THRESHOLD` | No | 3 | Stop expanding a domain after repeated 429s |
 
 ### Key Settings
 
@@ -450,16 +502,20 @@ Competitor/
 - **Min Chunk**: 100 tokens (discard very small chunks)
 
 **Crawling:**
-- **Max Pages**: 15 per website
+- **Max Pages**: 8 per website
 - **Max Depth**: 2 (prevents infinite crawling)
 - **Timeout**: 30 seconds per page
+- **Delay**: 2.5s to 4.0s jitter between same-domain requests
 - **Parallel Batches**: 3-4 competitors
 
 **Competitor Discovery:**
 - **Max Local Competitors**: 5 (India)
 - **Max Global Competitors**: 5 (International)
-- **DDG Rate Limit**: 1 second between queries
-- **Similarity Threshold**: 0.3 (minimum semantic similarity)
+- **Search Provider**: Tavily 
+- **Website Resolution**: Direct extraction from listing page HTML, Tavily fallback with hardened domain filtering
+- **Cross-Scope Dedupe**: Same competitor removed across local/global
+- **Similarity Threshold**: 0.25 (minimum semantic similarity)
+
 
 ---
 
@@ -556,24 +612,26 @@ competitors = discover_competitors(
 
 ---
 
-## Updated Competitor Discovery Flow
+## Competitor Discovery Flow
 
 ### Local Competitors (India)
-1. Search Tracxn: `tracxn "{brand}" company profile`
-2. Crawl Tracxn page
-3. Extract competitor names from page text
-4. Find official websites via DDG
-5. LLM validation (reject news/Q&A/generic sites)
-6. If < 5 valid: LLM fallback discovery
+1. Search Tracxn for the brand's company page via Tavily
+2. Crawl the Tracxn page and extract competitor names **and website URLs** directly from anchor tags
+3. Search Tavily for additional competitor-listing pages (Growjo, Similarweb)
+4. Crawl listing pages and extract competitor names + external website links from HTML
+5. For competitors still missing a website, fall back to Tavily lookup with hardened domain filtering
+6. LLM validation rejects irrelevant candidates; only validated results are used
+7. Post-crawl relevance validation removes mismatched brands
+8. Cross-scope dedupe prevents the same competitor from appearing in local and global
 
 ### Global Competitors
-1. Search DDG for competitor listing pages
-2. Crawl first relevant result (Tracxn, Similarweb, Owler)
-3. Extract competitor names and find websites
-4. LLM validation
-5. If < 5 valid: LLM fallback discovery
+1. Search Tavily for competitor-listing pages (Similarweb, Ahrefs, Growjo)
+2. Crawl listing pages and extract competitor names + external website links from HTML
+3. For competitors still missing a website, fall back to Tavily lookup with hardened domain filtering
+4. LLM validation filters weak candidates; only validated results are used
+5. Post-crawl relevance validation removes mismatched brands
+6. If < 3 valid candidates remain, use LLM fallback discovery
 
----
 
 ## Development
 
@@ -600,40 +658,7 @@ uv run ruff check .
 
 ---
 
-## Project Roadmap
 
-### Phase 1: Core Pipeline (Completed)
-- Web crawling with Playwright
-- Text processing and chunking
-- Business profile extraction
-- Competitor discovery with DDG
-
-### Phase 2: Enhanced AI Integration (Completed)
-- LangChain integration
-- Jina embeddings v5
-- Pinecone vector store
-- Parallel competitor crawling
-
-### Phase 3: Optimization (Completed)
-- Dynamic query generation with LLM
-- Improved relevance filtering
-- Response time optimization
-- Error handling improvements
-- Tracxn integration for local competitor discovery
-- Domain filtering for irrelevant results (news, Q&A, generic sites)
-- Website URL resolution for extracted competitors
-- LLM validation with strict rejection rules
-- LLM fallback system (automatic switch to Llama 70b on rate limit)
-- HuggingFace API integration for tokenizer
-
-### Phase 4: Future Enhancements
-- Multi-language support
-- Real-time monitoring
-- API rate limiting
-- Dashboard analytics
-- Export formats (CSV, Excel)
-
----
 
 ## License
 

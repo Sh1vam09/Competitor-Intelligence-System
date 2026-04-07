@@ -12,17 +12,19 @@ from typing import Optional, Any
 import numpy as np
 import requests
 
+from langchain_core.documents import Document
+from langchain_core.embeddings import Embeddings
+
 try:
     from pinecone import Pinecone, ServerlessSpec
-    from langchain_pinecone import PineconeVectorStore
-    from langchain_core.documents import Document
-    from langchain_core.embeddings import Embeddings
 except ImportError:
     Pinecone = None
     ServerlessSpec = None
+
+try:
+    from langchain_pinecone import PineconeVectorStore
+except ImportError:
     PineconeVectorStore = None
-    Document = None
-    Embeddings = None
 
 from utils.config import (
     JINA_API_KEY,

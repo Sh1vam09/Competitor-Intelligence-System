@@ -36,6 +36,9 @@ GROQ_RETRY_DELAY: float = float(os.getenv("GROQ_RETRY_DELAY", "2.0"))
 # ── HuggingFace ───────────────────────────────────────────────────────────────
 HF_API_KEY: str = os.getenv("HF_API_KEY", "")
 
+# ── Tavily Search ─────────────────────────────────────────────────────────────
+TAVILY_API_KEY: str = os.getenv("TAVILY_API_KEY", "")
+
 # ── Pinecone ───────────────────────────────────────────────────────────────────
 PINECONE_API_KEY: str = os.getenv("PINECONE_API_KEY", "")
 PINECONE_ENVIRONMENT: str = os.getenv("PINECONE_ENVIRONMENT", "us-east-1")
@@ -49,10 +52,13 @@ JINA_EMBEDDING_MODEL: str = os.getenv(
 
 # ── Crawler ────────────────────────────────────────────────────────────────────
 MAX_CRAWL_DEPTH: int = int(os.getenv("MAX_CRAWL_DEPTH", "2"))
-MAX_PAGES: int = int(os.getenv("MAX_PAGES", "15"))
+MAX_PAGES: int = int(os.getenv("MAX_PAGES", "8"))
 CRAWL_TIMEOUT_MS: int = int(os.getenv("CRAWL_TIMEOUT_MS", "30000"))
 SCROLL_PAUSE_MS: int = int(os.getenv("SCROLL_PAUSE_MS", "1000"))
 MAX_SCROLLS: int = int(os.getenv("MAX_SCROLLS", "3"))
+CRAWL_DELAY_MIN_SECS: float = float(os.getenv("CRAWL_DELAY_MIN_SECS", "2.5"))
+CRAWL_DELAY_MAX_SECS: float = float(os.getenv("CRAWL_DELAY_MAX_SECS", "4.0"))
+CRAWL_429_DOMAIN_THRESHOLD: int = int(os.getenv("CRAWL_429_DOMAIN_THRESHOLD", "3"))
 
 # ── Text Processing ───────────────────────────────────────────────────────────
 CHUNK_SIZE: int = int(os.getenv("CHUNK_SIZE", "1200"))
@@ -76,6 +82,7 @@ MAX_LOCAL_CANDIDATES = int(os.getenv("MAX_LOCAL_CANDIDATES", "7"))
 MAX_GLOBAL_CANDIDATES = int(os.getenv("MAX_GLOBAL_CANDIDATES", "7"))
 MAX_SEARCH_RESULTS: int = int(os.getenv("MAX_SEARCH_RESULTS", "15"))
 SEARCH_RATE_LIMIT_DELAY: float = float(os.getenv("SEARCH_RATE_LIMIT_DELAY", "5.0"))
+TAVILY_SEARCH_DEPTH: str = os.getenv("TAVILY_SEARCH_DEPTH", "advanced")
 COMPETITOR_CRAWL_DELAY: float = float(os.getenv("COMPETITOR_CRAWL_DELAY", "2.0"))
 
 # ── Database ───────────────────────────────────────────────────────────────────

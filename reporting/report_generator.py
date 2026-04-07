@@ -1,20 +1,13 @@
 """
 PDF Report Generator.
 
-Generates a comprehensive, multi-section downloadable PDF report
-using ReportLab with:
-    - Executive Summary
-    - Business Profile
-    - Visual Brand Analysis
-    - Competitor List with similarity scores
-    - Competitor Deep Profiles
-    - Side-by-Side Comparison Tables
-    - Strategic Insights
-    - Market Opportunities
-    - Recommendations
+Generates a concise, customer-facing downloadable PDF report using ReportLab.
+Internal diagnostics such as DOM structure, CTA aggressiveness, and tech stack
+are intentionally excluded from the final report.
 """
 
 import json
+import unicodedata
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -238,23 +231,8 @@ def generate_report(
         )
     elements.append(Spacer(1, 10))
 
-    # ── 3. DOM & Structural Analysis ───────────────────────────────────────
-    elements.append(
-        Paragraph("3. Website Structural Analysis", styles["SectionHeader"])
-    )
-    try:
-        elements.extend(_build_dom_section(dom_features))
-    except Exception as e:
-        logger.warning("Report section 'DOM Analysis' failed: %s", e)
-        elements.append(
-            Paragraph(
-                "DOM analysis data could not be rendered.", styles["BodyJustified"]
-            )
-        )
-    elements.append(Spacer(1, 10))
-
-    # ── 4. Visual Brand Analysis ───────────────────────────────────────────
-    elements.append(Paragraph("4. Visual Brand Analysis", styles["SectionHeader"]))
+    # ── 3. Visual Brand Analysis ───────────────────────────────────────────
+    elements.append(Paragraph("3. Visual Brand Analysis", styles["SectionHeader"]))
     try:
         elements.extend(_build_visual_section(visual_profile))
     except Exception as e:
@@ -276,7 +254,7 @@ def generate_report(
     # ── 5A. Local Competitor List ──────────────────────────────────────────
     elements.append(
         Paragraph(
-            f"5A. Local Competitors — India ({len(_local)})",
+            f"4A. Local Competitors — India ({len(_local)})",
             styles["SectionHeader"],
         )
     )
@@ -303,7 +281,7 @@ def generate_report(
     # ── 5B. Global Competitor List ─────────────────────────────────────────
     elements.append(
         Paragraph(
-            f"5B. Global Competitors ({len(_global)})",
+            f"4B. Global Competitors ({len(_global)})",
             styles["SectionHeader"],
         )
     )
@@ -327,7 +305,7 @@ def generate_report(
     # ── 6A. Local Competitor Deep Profiles ─────────────────────────────────
     if _local:
         elements.append(
-            Paragraph("6A. Local Competitor Deep Profiles", styles["SectionHeader"])
+            Paragraph("5A. Local Competitor Deep Profiles", styles["SectionHeader"])
         )
         try:
             elements.extend(_build_competitor_profiles(_local))
@@ -344,7 +322,7 @@ def generate_report(
     # ── 6B. Global Competitor Deep Profiles ────────────────────────────────
     if _global:
         elements.append(
-            Paragraph("6B. Global Competitor Deep Profiles", styles["SectionHeader"])
+            Paragraph("5B. Global Competitor Deep Profiles", styles["SectionHeader"])
         )
         try:
             elements.extend(_build_competitor_profiles(_global))
@@ -359,7 +337,7 @@ def generate_report(
     elements.append(PageBreak())
 
     # ── 7. Side-by-Side Comparison ─────────────────────────────────────────
-    elements.append(Paragraph("7. Side-by-Side Comparison", styles["SectionHeader"]))
+    elements.append(Paragraph("6. Side-by-Side Comparison", styles["SectionHeader"]))
     try:
         elements.extend(
             _build_comparison_section(comparison, business_profile, competitors)
@@ -373,7 +351,7 @@ def generate_report(
 
     # ── 8. Strategic Insights ──────────────────────────────────────────────
     elements.append(
-        Paragraph("8. Strategic Threat Assessment", styles["SectionHeader"])
+        Paragraph("7. Strategic Threat Assessment", styles["SectionHeader"])
     )
     try:
         elements.extend(_build_threats_section(comparison))
@@ -387,7 +365,7 @@ def generate_report(
     elements.append(Spacer(1, 10))
 
     # ── 9. Market Opportunities ────────────────────────────────────────────
-    elements.append(Paragraph("9. White Space Opportunities", styles["SectionHeader"]))
+    elements.append(Paragraph("8. White Space Opportunities", styles["SectionHeader"]))
     try:
         elements.extend(_build_opportunities_section(comparison))
     except Exception as e:
@@ -400,7 +378,7 @@ def generate_report(
     elements.append(Spacer(1, 10))
 
     # ── 10. Recommendations ────────────────────────────────────────────────
-    elements.append(Paragraph("10. Strategic Recommendations", styles["SectionHeader"]))
+    elements.append(Paragraph("9. Strategic Recommendations", styles["SectionHeader"]))
     try:
         elements.extend(_build_recommendations_section(comparison))
     except Exception as e:
@@ -433,6 +411,23 @@ def _sanitize_text(text: str) -> str:
     if not isinstance(text, str):
         text = str(text)
 
+    # Repair common mojibake sequences before further cleanup.
+    if any(marker in text for marker in ("â", "Ã", "Â", "â€™", "â€œ", "â€")):
+        try:
+            text = text.encode("latin1", "ignore").decode("utf-8", "ignore")
+        except Exception:
+            pass
+
+    # Remove lightweight markdown artifacts that occasionally leak through LLMs.
+    text = (
+        text.replace("**", "")
+        .replace("__", "")
+        .replace("`", "")
+        .replace("### ", "")
+        .replace("## ", "")
+        .replace("# ", "")
+    )
+
     # Replace common problematic Unicode characters with simple alternatives
     text = text.replace("\u2022", "-")  # Bullet point
     text = text.replace("\u2023", "-")  # Triangle bullet
@@ -442,6 +437,25 @@ def _sanitize_text(text: str) -> str:
     text = text.replace("\u25cc", "*")  # Dotted circle
     text = text.replace("\u25e6", "*")  # White bullet
     text = text.replace("\u2027", "*")  # Interpunct
+    text = text.replace("\u2013", "-")  # En dash
+    text = text.replace("\u2014", "-")  # Em dash
+    text = text.replace("\u2010", "-")  # Hyphen
+    text = text.replace("\u2011", "-")  # Non-breaking hyphen
+    text = text.replace("\u2012", "-")  # Figure dash
+    text = text.replace("\u2015", "-")  # Horizontal bar
+    text = text.replace("\u2212", "-")  # Minus sign
+    text = text.replace("\u00ad", "-")  # Soft hyphen
+    text = text.replace("\u2018", "'")  # Left single quote
+    text = text.replace("\u2019", "'")  # Right single quote
+    text = text.replace("\u201c", '"')  # Left double quote
+    text = text.replace("\u201d", '"')  # Right double quote
+    text = text.replace("\u2026", "...")  # Ellipsis
+    text = text.replace("\u20b9", "Rs.")  # Indian Rupee
+    text = text.replace("\u00a0", " ")  # Non-breaking space
+    text = text.replace("\u202f", " ")  # Narrow no-break space
+    text = text.replace("\ufeff", "")  # BOM
+
+    text = unicodedata.normalize("NFKC", text)
 
     # Remove control characters (0x00-0x1F) except \n, \r, \t
     cleaned = []
@@ -453,8 +467,8 @@ def _sanitize_text(text: str) -> str:
             cleaned.append(char)
     text = "".join(cleaned)
 
-    # Convert any remaining problematic Unicode to ASCII replacement
-    text = text.encode("ascii", "replace").decode("ascii")
+    # Convert any remaining problematic Unicode to ASCII without injecting '?'.
+    text = text.encode("ascii", "ignore").decode("ascii")
 
     return text
 
@@ -496,7 +510,6 @@ def _build_profile_section(profile: dict) -> list:
         ("Geography Focus", "geography_focus"),
         ("Marketing Style", "marketing_style"),
         ("Funnel Type", "funnel_type"),
-        ("CTA Aggressiveness", "CTA_aggressiveness_score"),
         ("Content Marketing", "content_marketing_presence"),
     ]
 
@@ -516,12 +529,11 @@ def _build_profile_section(profile: dict) -> list:
         ("Products/Services", "products_services"),
         ("Key Features", "key_features"),
         ("Differentiation", "differentiation_claims"),
-        ("Tech Stack", "tech_stack_detected"),
     ]:
         values = profile.get(key, [])
         if isinstance(values, list):
             formatted = (
-                "• " + "\n• ".join(_escape(str(v)) for v in values) if values else "N/A"
+                "- " + "\n- ".join(_escape(str(v)) for v in values) if values else "N/A"
             )
         else:
             formatted = _escape(str(values))

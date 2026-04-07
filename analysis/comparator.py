@@ -52,7 +52,7 @@ Generate a structured comparative intelligence analysis. You MUST return ONLY a 
         "emerging_features": ["Features that are becoming table stakes in the industry"]
     }},
     "brand_personality_differences": "Analysis of how brand personalities differ — tone, visual identity, communication style, target audience appeal.",
-    "marketing_strategy_differences": "Comparison of marketing approaches — channels used, content strategy, funnel types, CTA aggressiveness.",
+    "marketing_strategy_differences": "Comparison of marketing approaches — channels used, content strategy, merchandising, offers, and customer acquisition style.",
     "market_saturation_estimate": {{
         "saturation_level": "<low/medium/high>",
         "reasoning": "Why you assessed this saturation level",
@@ -88,7 +88,10 @@ IMPORTANT:
 1. Return ONLY the JSON object. No markdown, no code fences.
 2. Be specific and actionable — avoid generic advice.
 3. Reference specific companies by name in your analysis.
-4. Base all assessments on the provided profile data."""
+4. Base all assessments strictly on the provided profile data.
+5. Do NOT invent unsupported claims, market trends, or strategic ideas. If evidence is weak, say less.
+6. Do NOT use customer-irrelevant diagnostics such as DOM metrics, CTA aggressiveness scores, or tech-stack trivia.
+7. Every threat, opportunity, and recommendation must clearly tie back to a concrete competitor fact from the provided profiles."""
 
 
 def generate_comparative_analysis(
@@ -224,7 +227,9 @@ Key findings:
 
 Positioning: {comparison.get("positioning_comparison", "N/A")[:500]}
 
-Write in a professional, analytical tone. Be specific and data-driven. Return only the summary text, no JSON."""
+Write in a professional, analytical tone. Be specific and data-driven.
+Do not use markdown formatting. Do not introduce new claims or recommendations beyond the provided analysis.
+Return only the summary text, no JSON."""
 
         # Use LangChain ChatGroq with fallback
         messages = [HumanMessage(content=prompt)]

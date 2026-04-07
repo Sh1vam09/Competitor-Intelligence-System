@@ -7,7 +7,7 @@ Orchestrates the complete competitor intelligence pipeline:
     3. Visual analysis via Gemini Vision
     4. Structured business extraction via Gemini
     5. Generate embeddings
-    6. Discover competitors via DuckDuckGo
+    6. Discover competitors via Tavily
     7. Crawl and analyze each competitor
     8. Generate comparative intelligence analysis
     9. Generate PDF report
@@ -25,7 +25,10 @@ from processing.dom_analyzer import extract_dom_features
 from vision.visual_analyzer import analyze_screenshot
 from extraction.business_extractor import extract_business_profile
 from embedding.embedder import EmbeddingEngine
-from competitor_discovery.discovery import discover_competitors
+from competitor_discovery.discovery import (
+    discover_competitors,
+    validate_competitor_relevance,
+)
 from analysis.comparator import (
     generate_comparative_analysis,
     generate_executive_summary,
@@ -47,6 +50,65 @@ from utils.helpers import extract_domain
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _has_target_segment_conflict(source_profile: dict, competitor_profile: dict) -> bool:
+    """Reject obvious audience mismatches such as men's vs women's brands."""
+    source_blob = " ".join(
+        str(source_profile.get(key, ""))
+        for key in ("industry", "target_customer", "positioning_statement")
+    ).lower()
+    competitor_blob = " ".join(
+        str(competitor_profile.get(key, ""))
+        for key in ("industry", "target_customer", "positioning_statement")
+    ).lower()
+
+    mens_terms = (" men", " men's", "mens", "male", "gentlemen", "guys")
+    womens_terms = (" women", " women's", "womens", "female", "ladies", "girls")
+
+    source_mens = any(term in source_blob for term in mens_terms)
+    source_womens = any(term in source_blob for term in womens_terms)
+    competitor_mens = any(term in competitor_blob for term in mens_terms)
+    competitor_womens = any(term in competitor_blob for term in womens_terms)
+
+    if source_mens and competitor_womens and not competitor_mens:
+        return True
+    if source_womens and competitor_mens and not competitor_womens:
+        return True
+    return False
+
+
+def _dedupe_competitors_across_scopes(
+    local_candidates: list[dict],
+    global_candidates: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    """Prevent the same competitor from appearing in both local and global pools."""
+    def base_domain(value: str) -> str:
+        parts = (value or "").lower().split(".")
+        return ".".join(parts[-2:]) if len(parts) >= 2 else value.lower()
+
+    local_seen_domains = set()
+    local_seen_names = set()
+
+    for candidate in local_candidates:
+        domain = extract_domain(candidate.get("url", "") or candidate.get("domain", ""))
+        name = (candidate.get("name") or "").strip().lower()
+        if domain:
+            local_seen_domains.add(base_domain(domain))
+        if name:
+            local_seen_names.add(name)
+
+    filtered_global = []
+    for candidate in global_candidates:
+        domain = extract_domain(candidate.get("url", "") or candidate.get("domain", ""))
+        name = (candidate.get("name") or "").strip().lower()
+        if domain and base_domain(domain) in local_seen_domains:
+            continue
+        if name and name in local_seen_names:
+            continue
+        filtered_global.append(candidate)
+
+    return local_candidates, filtered_global
 
 
 class PipelineOrchestrator:
@@ -155,7 +217,7 @@ class PipelineOrchestrator:
                 )
                 logger.info("Found %d local candidates", len(local_candidates))
 
-                # ── Pause between scopes to avoid DDG rate limits ─────────
+                # ── Pause between scopes to avoid search rate limits ───────
                 await asyncio.sleep(5)
 
                 # ── Step 7b: Discover GLOBAL competitors ───────────────────
@@ -169,6 +231,16 @@ class PipelineOrchestrator:
                     scope="global",
                 )
                 logger.info("Found %d global candidates", len(global_candidates))
+
+                local_candidates, global_candidates = _dedupe_competitors_across_scopes(
+                    local_candidates,
+                    global_candidates,
+                )
+                logger.info(
+                    "After cross-scope dedupe: %d local, %d global candidates",
+                    len(local_candidates),
+                    len(global_candidates),
+                )
 
                 all_competitor_data = []
 
@@ -447,6 +519,19 @@ class PipelineOrchestrator:
                         "success": False,
                         "error": f"Industry mismatch: {comp_industry} vs {source_industry}",
                     }
+
+            if _has_target_segment_conflict(source_profile, comp_profile):
+                return {
+                    "success": False,
+                    "error": "Target customer mismatch with source brand",
+                }
+
+            relevance = validate_competitor_relevance(source_profile, comp_profile)
+            if not relevance.get("relevant", False):
+                return {
+                    "success": False,
+                    "error": f"Irrelevant competitor: {relevance.get('reason', 'rejected')}",
+                }
 
             seen_names.add(name_key)
 

@@ -14,10 +14,11 @@ Features:
 """
 
 import asyncio
-from dataclasses import dataclass, field
 from collections import deque
-from typing import Optional
+from dataclasses import dataclass, field
 from pathlib import Path
+import random
+from typing import Optional
 
 from playwright.async_api import async_playwright, Page, Browser
 
@@ -28,6 +29,9 @@ from utils.config import (
     SCROLL_PAUSE_MS,
     MAX_SCROLLS,
     SCREENSHOTS_DIR,
+    CRAWL_DELAY_MIN_SECS,
+    CRAWL_DELAY_MAX_SECS,
+    CRAWL_429_DOMAIN_THRESHOLD,
 )
 from utils.helpers import (
     normalize_url,
@@ -43,8 +47,28 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 MAX_RETRIES = 3
-INITIAL_BACKOFF_SECS = 2.0
+INITIAL_BACKOFF_SECS = 4.0
 BACKOFF_MULTIPLIER = 2.0
+LOW_VALUE_PATH_FRAGMENTS = (
+    "/blog",
+    "/blogs",
+    "/faq",
+    "/faqs",
+    "/return",
+    "/refund",
+    "/privacy",
+    "/policy",
+    "/policies",
+    "/terms",
+    "/reward",
+    "/rewards",
+    "/store-locator",
+    "/store-locations",
+    "/contact",
+    "/account",
+    "/cart",
+    "/login",
+)
 
 
 @dataclass
@@ -78,6 +102,8 @@ class AdaptiveCrawler:
         self.visited_urls: set[str] = set()
         self.content_hashes: set[str] = set()
         self.pages: list[CrawledPage] = []
+        self.domain_429_counts: dict[str, int] = {}
+        self.throttled_domains: set[str] = set()
 
     async def crawl(self, start_url: str) -> list[CrawledPage]:
         """
@@ -109,18 +135,28 @@ class AdaptiveCrawler:
 
             while queue and len(self.pages) < self.max_pages:
                 current_url, depth = queue.popleft()
+                current_domain = extract_domain(current_url).lower()
 
                 # Skip if already visited or too deep
                 if current_url in self.visited_urls:
                     continue
                 if depth > self.max_depth:
                     continue
+                if current_domain in self.throttled_domains:
+                    logger.info(
+                        "Skipping throttled domain %s for %s",
+                        current_domain,
+                        current_url,
+                    )
+                    continue
 
                 self.visited_urls.add(current_url)
 
                 # Rate-limit: polite delay between requests
                 if len(self.visited_urls) > 1:
-                    await asyncio.sleep(1.5)
+                    await asyncio.sleep(
+                        random.uniform(CRAWL_DELAY_MIN_SECS, CRAWL_DELAY_MAX_SECS)
+                    )
 
                 # Crawl the page and extract links in one go
                 page_data, links = await self._crawl_page(
@@ -152,7 +188,12 @@ class AdaptiveCrawler:
                 if depth < self.max_depth:
                     for link in links:
                         normalized = normalize_url(link)
-                        if normalized not in self.visited_urls:
+                        if (
+                            normalized not in self.visited_urls
+                            and not self._is_low_value_path(normalized)
+                            and extract_domain(normalized).lower()
+                            not in self.throttled_domains
+                        ):
                             queue.append((normalized, depth + 1))
 
             await browser.close()
@@ -176,6 +217,7 @@ class AdaptiveCrawler:
         """
         page: Page = await context.new_page()
         discovered_links: list[str] = []
+        domain = extract_domain(url).lower()
         last_error: Optional[str] = None
         for attempt in range(MAX_RETRIES):
             try:
@@ -207,6 +249,9 @@ class AdaptiveCrawler:
                     return None, []
 
                 if response.status == 429:
+                    self.domain_429_counts[domain] = (
+                        self.domain_429_counts.get(domain, 0) + 1
+                    )
                     backoff = INITIAL_BACKOFF_SECS * (BACKOFF_MULTIPLIER**attempt)
                     logger.warning(
                         "Rate limited (429) on %s, attempt %d/%d. "
@@ -216,6 +261,13 @@ class AdaptiveCrawler:
                         MAX_RETRIES,
                         backoff,
                     )
+                    if self.domain_429_counts[domain] >= CRAWL_429_DOMAIN_THRESHOLD:
+                        self.throttled_domains.add(domain)
+                        logger.warning(
+                            "Domain %s hit %d rate limits; pausing further crawl expansion for this domain.",
+                            domain,
+                            self.domain_429_counts[domain],
+                        )
                     await asyncio.sleep(backoff)
                     continue
 
@@ -271,6 +323,7 @@ class AdaptiveCrawler:
 
             # Give the page a moment to settle (JS rendering)
             await page.wait_for_timeout(2000)
+            self.domain_429_counts[domain] = 0
 
             # Detect parked / expired domain pages
             page_title = await page.title()
@@ -319,6 +372,7 @@ class AdaptiveCrawler:
                         is_valid_url(link)
                         and is_same_domain(link, base_domain)
                         and is_crawlable_url(link)
+                        and not self._is_low_value_path(link)
                     ):
                         discovered_links.append(link)
                 discovered_links = list(set(discovered_links))
@@ -368,8 +422,35 @@ class AdaptiveCrawler:
             await page.evaluate("window.scrollBy(0, window.innerHeight)")
             await page.wait_for_timeout(SCROLL_PAUSE_MS)
 
+    def _is_low_value_path(self, url: str) -> bool:
+        """Filter low-signal URLs that commonly trigger throttling."""
+        lowered = url.lower()
+        return any(fragment in lowered for fragment in LOW_VALUE_PATH_FRAGMENTS)
+
     # _extract_links is now integrated into _crawl_page to avoid
     # opening a separate browser page for every URL (which caused 429s).
+
+
+def _run_async(coro):
+    """Run async coroutine in a separate thread to avoid nested loop issues."""
+    import asyncio
+    import concurrent.futures
+    import sys
+
+    def run_in_thread():
+        if sys.platform == "win32":
+            loop = asyncio.ProactorEventLoop()
+        else:
+            loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        try:
+            return loop.run_until_complete(coro)
+        finally:
+            loop.close()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(run_in_thread)
+        return future.result()
 
 
 def run_crawler(url: str) -> list[CrawledPage]:
@@ -383,4 +464,4 @@ def run_crawler(url: str) -> list[CrawledPage]:
         List of CrawledPage objects.
     """
     crawler = AdaptiveCrawler()
-    return asyncio.run(crawler.crawl(url))
+    return _run_async(crawler.crawl(url))
