@@ -165,7 +165,7 @@ def retry_with_backoff(
 ) -> Callable:
     """
     Decorator that retries a function with exponential backoff.
-    Handles Groq RateLimitError specially by respecting retry_after.
+    Handles provider rate-limit errors specially by respecting retry_after.
 
     Args:
         max_retries: Maximum number of retry attempts.
@@ -194,7 +194,7 @@ def retry_with_backoff(
                         )
                         raise
 
-                    # Check if this is a Groq rate limit error
+                    # Check if this is a provider rate limit error
                     actual_delay = delay
                     error_type = type(e).__name__
                     if "RateLimitError" in error_type:

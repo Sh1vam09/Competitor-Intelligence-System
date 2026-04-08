@@ -14,7 +14,7 @@ import json
 import sys
 import threading
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from pathlib import Path
 from typing import Optional
 
@@ -119,6 +119,10 @@ def _run_pipeline(job_id: str, url: str) -> None:
         try:
             result = loop.run_until_complete(orchestrator.run(url))
         finally:
+            with suppress(Exception):
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            with suppress(Exception):
+                loop.run_until_complete(loop.shutdown_default_executor())
             loop.close()
 
         if result.get("status") == "completed":

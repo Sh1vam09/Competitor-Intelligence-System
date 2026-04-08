@@ -23,15 +23,37 @@ FAISS_DIR = DATA_DIR / "faiss"
 for _dir in [DATA_DIR, SCREENSHOTS_DIR, REPORTS_DIR, FAISS_DIR]:
     _dir.mkdir(parents=True, exist_ok=True)
 
-# ── Groq / Llama ───────────────────────────────────────────────────────────────
-GROQ_API_KEY: str = os.getenv("GROQ_API_KEY", "")
-GROQ_MODEL: str = os.getenv("GROQ_MODEL", "meta-llama/llama-3.1-8b-instruct")
-GROQ_FALLBACK_MODEL: str = os.getenv("GROQ_FALLBACK_MODEL", "llama-3.3-70b-versatile")
-GROQ_VISION_MODEL: str = os.getenv(
-    "GROQ_VISION_MODEL", "meta-llama/llama-3.2-11b-vision-preview"
+# ── OpenRouter / LLMs ──────────────────────────────────────────────────────────
+OPENROUTER_API_KEY: str = os.getenv(
+    "OPENROUTER_API_KEY",
+    "",
 )
-GROQ_MAX_RETRIES: int = int(os.getenv("GROQ_MAX_RETRIES", "3"))
-GROQ_RETRY_DELAY: float = float(os.getenv("GROQ_RETRY_DELAY", "2.0"))
+OPENROUTER_BASE_URL: str = os.getenv(
+    "OPENROUTER_BASE_URL", "https://openrouter.ai/api/v1"
+)
+OPENROUTER_MODEL: str = os.getenv(
+    "OPENROUTER_MODEL",
+    "xiaomi/mimo-v2-pro",
+)
+OPENROUTER_FALLBACK_MODEL: str = os.getenv(
+    "OPENROUTER_FALLBACK_MODEL",
+    "google/gemma-4-31b-it:free",
+)
+OPENROUTER_VISION_MODEL: str = os.getenv(
+    "OPENROUTER_VISION_MODEL",
+    "google/gemma-4-31b-it:free",
+)
+OPENROUTER_MAX_RETRIES: int = int(
+    os.getenv("OPENROUTER_MAX_RETRIES", "3")
+)
+OPENROUTER_RETRY_DELAY: float = float(
+    os.getenv("OPENROUTER_RETRY_DELAY", "2.0")
+)
+OPENROUTER_APP_NAME: str = os.getenv(
+    "OPENROUTER_APP_NAME", "competitor-intelligence-engine"
+)
+OPENROUTER_HTTP_REFERER: str = os.getenv("OPENROUTER_HTTP_REFERER", "")
+
 
 # ── HuggingFace ───────────────────────────────────────────────────────────────
 HF_API_KEY: str = os.getenv("HF_API_KEY", "")
@@ -84,6 +106,9 @@ MAX_SEARCH_RESULTS: int = int(os.getenv("MAX_SEARCH_RESULTS", "15"))
 SEARCH_RATE_LIMIT_DELAY: float = float(os.getenv("SEARCH_RATE_LIMIT_DELAY", "5.0"))
 TAVILY_SEARCH_DEPTH: str = os.getenv("TAVILY_SEARCH_DEPTH", "advanced")
 COMPETITOR_CRAWL_DELAY: float = float(os.getenv("COMPETITOR_CRAWL_DELAY", "2.0"))
+COMPETITOR_CRAWL_CONCURRENCY: int = int(
+    os.getenv("COMPETITOR_CRAWL_CONCURRENCY", "1")
+)
 
 # ── Database ───────────────────────────────────────────────────────────────────
 DATABASE_URL: str = os.getenv(

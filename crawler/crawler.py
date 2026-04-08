@@ -15,6 +15,7 @@ Features:
 
 import asyncio
 from collections import deque
+from contextlib import suppress
 from dataclasses import dataclass, field
 from pathlib import Path
 import random
@@ -119,84 +120,92 @@ class AdaptiveCrawler:
         logger.info("Starting crawl of %s (domain: %s)", start_url, base_domain)
 
         async with async_playwright() as pw:
-            browser = await pw.chromium.launch(headless=True)
-            context = await browser.new_context(
-                viewport={"width": 1920, "height": 1080},
-                user_agent=(
-                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                    "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/120.0.0.0 Safari/537.36"
-                ),
-            )
+            browser: Browser | None = None
+            context = None
+            try:
+                browser = await pw.chromium.launch(headless=True)
+                context = await browser.new_context(
+                    viewport={"width": 1920, "height": 1080},
+                    user_agent=(
+                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                        "AppleWebKit/537.36 (KHTML, like Gecko) "
+                        "Chrome/120.0.0.0 Safari/537.36"
+                    ),
+                )
 
-            # BFS queue: (url, depth)
-            queue: deque[tuple[str, int]] = deque()
-            queue.append((normalize_url(start_url), 0))
+                # BFS queue: (url, depth)
+                queue: deque[tuple[str, int]] = deque()
+                queue.append((normalize_url(start_url), 0))
 
-            while queue and len(self.pages) < self.max_pages:
-                current_url, depth = queue.popleft()
-                current_domain = extract_domain(current_url).lower()
+                while queue and len(self.pages) < self.max_pages:
+                    current_url, depth = queue.popleft()
+                    current_domain = extract_domain(current_url).lower()
 
-                # Skip if already visited or too deep
-                if current_url in self.visited_urls:
-                    continue
-                if depth > self.max_depth:
-                    continue
-                if current_domain in self.throttled_domains:
+                    # Skip if already visited or too deep
+                    if current_url in self.visited_urls:
+                        continue
+                    if depth > self.max_depth:
+                        continue
+                    if current_domain in self.throttled_domains:
+                        logger.info(
+                            "Skipping throttled domain %s for %s",
+                            current_domain,
+                            current_url,
+                        )
+                        continue
+
+                    self.visited_urls.add(current_url)
+
+                    # Rate-limit: polite delay between requests
+                    if len(self.visited_urls) > 1:
+                        await asyncio.sleep(
+                            random.uniform(CRAWL_DELAY_MIN_SECS, CRAWL_DELAY_MAX_SECS)
+                        )
+
+                    # Crawl the page and extract links in one go
+                    page_data, links = await self._crawl_page(
+                        context,
+                        current_url,
+                        depth,
+                        base_domain,
+                    )
+                    if page_data is None:
+                        continue
+
+                    # Content deduplication
+                    c_hash = content_hash(page_data.cleaned_text)
+                    if c_hash in self.content_hashes:
+                        logger.debug("Duplicate content skipped: %s", current_url)
+                        continue
+                    self.content_hashes.add(c_hash)
+
+                    self.pages.append(page_data)
                     logger.info(
-                        "Skipping throttled domain %s for %s",
-                        current_domain,
+                        "Crawled [%d/%d] depth=%d: %s",
+                        len(self.pages),
+                        self.max_pages,
+                        depth,
                         current_url,
                     )
-                    continue
 
-                self.visited_urls.add(current_url)
-
-                # Rate-limit: polite delay between requests
-                if len(self.visited_urls) > 1:
-                    await asyncio.sleep(
-                        random.uniform(CRAWL_DELAY_MIN_SECS, CRAWL_DELAY_MAX_SECS)
-                    )
-
-                # Crawl the page and extract links in one go
-                page_data, links = await self._crawl_page(
-                    context,
-                    current_url,
-                    depth,
-                    base_domain,
-                )
-                if page_data is None:
-                    continue
-
-                # Content deduplication
-                c_hash = content_hash(page_data.cleaned_text)
-                if c_hash in self.content_hashes:
-                    logger.debug("Duplicate content skipped: %s", current_url)
-                    continue
-                self.content_hashes.add(c_hash)
-
-                self.pages.append(page_data)
-                logger.info(
-                    "Crawled [%d/%d] depth=%d: %s",
-                    len(self.pages),
-                    self.max_pages,
-                    depth,
-                    current_url,
-                )
-
-                # Enqueue discovered links for BFS
-                if depth < self.max_depth:
-                    for link in links:
-                        normalized = normalize_url(link)
-                        if (
-                            normalized not in self.visited_urls
-                            and not self._is_low_value_path(normalized)
-                            and extract_domain(normalized).lower()
-                            not in self.throttled_domains
-                        ):
-                            queue.append((normalized, depth + 1))
-
-            await browser.close()
+                    # Enqueue discovered links for BFS
+                    if depth < self.max_depth:
+                        for link in links:
+                            normalized = normalize_url(link)
+                            if (
+                                normalized not in self.visited_urls
+                                and not self._is_low_value_path(normalized)
+                                and extract_domain(normalized).lower()
+                                not in self.throttled_domains
+                            ):
+                                queue.append((normalized, depth + 1))
+            finally:
+                if context is not None:
+                    with suppress(Exception):
+                        await context.close()
+                if browser is not None:
+                    with suppress(Exception):
+                        await browser.close()
 
         logger.info("Crawl complete. Total pages: %d", len(self.pages))
         return self.pages
@@ -313,7 +322,12 @@ class AdaptiveCrawler:
             final_url = page.url
             intended_domain = extract_domain(url).lower()
             final_domain = extract_domain(final_url).lower()
-            if intended_domain and final_domain and intended_domain != final_domain:
+            if (
+                intended_domain
+                and final_domain
+                and final_domain != intended_domain
+                and not is_same_domain(final_url, intended_domain)
+            ):
                 logger.warning(
                     "Domain redirect detected: %s → %s. Skipping.",
                     intended_domain,
@@ -446,6 +460,10 @@ def _run_async(coro):
         try:
             return loop.run_until_complete(coro)
         finally:
+            with suppress(Exception):
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            with suppress(Exception):
+                loop.run_until_complete(loop.shutdown_default_executor())
             loop.close()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:

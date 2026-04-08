@@ -2,7 +2,7 @@
 Competitor Discovery Module.
 
 Uses a two-pronged approach to discover competitors:
-1. LLM-based discovery (Groq via LangChain) — asks the LLM to identify competitors
+1. LLM-based discovery (OpenRouter via LangChain) — asks the LLM to identify competitors
    based on the business profile. Fast and reliable.
 2. Tavily web search — used to search with brand features
    to find competitors with enhanced queries.
@@ -12,15 +12,13 @@ import json
 import re
 import sys
 import time
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urljoin
 import requests
 from bs4 import BeautifulSoup
 
 from langchain_core.messages import HumanMessage
 
 from utils.config import (
-    GROQ_API_KEY,
-    GROQ_MODEL,
     MAX_COMPETITORS,
     MAX_SEARCH_RESULTS,
     SEARCH_RATE_LIMIT_DELAY,
@@ -42,6 +40,7 @@ def _run_async(coro):
     """Run async coroutine in a separate thread to avoid nested loop issues."""
     import asyncio
     import concurrent.futures
+    from contextlib import suppress
     import sys
 
     def run_in_thread():
@@ -55,6 +54,10 @@ def _run_async(coro):
         try:
             return loop.run_until_complete(coro)
         finally:
+            with suppress(Exception):
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            with suppress(Exception):
+                loop.run_until_complete(loop.shutdown_default_executor())
             loop.close()
 
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
@@ -184,6 +187,55 @@ def _is_competitor_listing_page(url: str, title: str = "") -> bool:
     )
 
 
+def _result_mentions_brand(result: dict, brand_name: str, source_domain: str) -> bool:
+    """Require listing search results to clearly refer to the source brand."""
+    brand_name = (brand_name or "").strip().lower()
+    source_domain = (source_domain or "").strip().lower()
+    href = (result.get("href") or "").strip().lower()
+    title = (result.get("title") or "").strip().lower()
+    content = (result.get("content") or result.get("body") or "").strip().lower()
+    haystack = f"{href} {title} {content}"
+
+    if brand_name and brand_name in haystack:
+        return True
+
+    if source_domain and source_domain in haystack:
+        return True
+
+    source_base = _get_base_domain(source_domain)
+    if source_base and source_base in haystack:
+        return True
+
+    return False
+
+
+def _matches_tracxn_brand_result(result: dict, brand_name: str) -> bool:
+    """Require a Tracxn search result to match the requested brand itself."""
+    brand_name = (brand_name or "").strip().lower()
+    href = (result.get("href") or "").strip().lower()
+    title = (result.get("title") or "").strip().lower()
+
+    if not brand_name or "tracxn.com" not in href:
+        return False
+
+    normalized_brand = re.sub(r"[^a-z0-9]+", "", brand_name)
+    normalized_href = re.sub(r"[^a-z0-9]+", "", href)
+    normalized_title = re.sub(r"[^a-z0-9]+", "", title)
+
+    if normalized_brand and (
+        normalized_brand in normalized_href or normalized_brand in normalized_title
+    ):
+        return True
+
+    slug_match = re.search(r"/d/companies/([^/]+)/", href)
+    if slug_match:
+        slug = re.sub(r"[^a-z0-9]+", "", slug_match.group(1).lower())
+        if slug == normalized_brand:
+            return True
+
+    return False
+
+
 def _normalize_company_name(name: str) -> str:
     """Normalize noisy extracted company names from listing pages."""
     name = re.sub(r"\s+", " ", (name or "")).strip()
@@ -226,6 +278,18 @@ def _looks_like_company_name(name: str, source_brand: str) -> bool:
         "revenue",
         "overview",
         "industry",
+        "claim profile",
+        "suggest edits",
+        "request page removal",
+        "company deep-dive",
+        "all related reports",
+        "market share",
+        "retention",
+        "comparables",
+        "invest",
+        "companies",
+        "company profile",
+        "email",
     )
     if any(term in lowered for term in blocked_terms):
         return False
@@ -416,8 +480,10 @@ def discover_competitors(
     scope: str = "global",
 ) -> list[dict]:
     """
-    Discover and rank competitors using web search first,
-    then validate and refine with LLM.
+    Discover and rank competitors.
+
+    Local discovery uses Tavily only to find the Tracxn page, then Tracxn plus LLM validation.
+    Global discovery uses LLM-only generation plus LLM validation.
 
     Args:
         business_profile: Structured business profile of the input company.
@@ -450,24 +516,31 @@ def discover_competitors(
             logger.info(
                 "Tracxn discovered %d local candidates", len(tracxn_competitors)
             )
+            logger.info(
+                "Accepted Tracxn local competitors: %s",
+                [c.get("name", "") for c in tracxn_competitors],
+            )
         else:
-            logger.info("Tracxn found 0 local candidates, falling back to Tavily")
+            logger.info("Tracxn found 0 local candidates, falling back to LLM")
 
-    # ── Step 2: Tavily Search ─────────────────────────────────────────────────
-    logger.info("Discovering %s competitors via Tavily...", scope)
-    search_competitors = _discover_via_tavily(
-        business_profile,
-        source_domain,
-        scope,
-    )
-    if search_competitors:
-        all_candidates.extend(search_competitors)
-        logger.info(
-            "Tavily discovered %d %s candidates", len(search_competitors), scope
+    # ── Step 2: Scope-specific discovery ─────────────────────────────────────
+    if scope == "global":
+        logger.info("Discovering global competitors via LLM only...")
+        llm_candidates = _discover_via_llm(
+            business_profile,
+            source_url,
+            source_domain,
+            max_competitors * 2,  # Get more candidates
+            scope,
         )
+        all_candidates.extend(llm_candidates)
+        all_candidates = _filter_candidate_pool(all_candidates, source_domain)
+        logger.info("LLM discovered %d %s candidates", len(llm_candidates), scope)
+    else:
+        logger.info("Using Tracxn-only discovery for local competitors...")
 
     # ── Step 3: LLM Fallback (if Tracxn/Tavily fail OR < 5 total candidates) ───
-    if not all_candidates or (len(all_candidates) < 5):
+    if scope == "local" and not all_candidates:
         logger.info("Insufficient candidates, using LLM discovery fallback...")
         llm_fallback = _discover_via_llm(
             business_profile,
@@ -495,7 +568,7 @@ def discover_competitors(
     logger.info("LLM validated %d %s candidates", len(llm_validated), scope)
 
     # ── Step 4: LLM Fallback if validation failed (< 5 valid candidates) ──────
-    if needs_fallback or len(llm_validated) < 5:
+    if scope == "global" and (needs_fallback or len(llm_validated) < 5):
         logger.info("Validation insufficient (< 5 candidates), using LLM fallback...")
         llm_fallback = _discover_via_llm(
             business_profile,
@@ -522,7 +595,13 @@ def discover_competitors(
             logger.info("Re-validated to %d %s candidates", len(llm_validated), scope)
 
     # ── Merge results (LLM takes priority with validation) ──────────────────
-    merged = _merge_results(llm_validated, all_candidates, source_domain)
+    merged = _merge_results(
+        llm_validated,
+        all_candidates,
+        source_domain,
+        preferred_candidates=tracxn_competitors if scope == "local" else None,
+        allow_raw_fill=scope != "local",
+    )
 
     # ── Semantic similarity scoring ────────────────────────────────────────
     if profile_embedding is not None and embedding_engine is not None:
@@ -553,7 +632,7 @@ def _discover_via_llm(
     max_competitors: int,
     scope: str = "global",
 ) -> list[dict]:
-    """Use Groq via LangChain to identify competitors from business profile."""
+    """Use the configured OpenRouter model to identify competitors."""
     try:
         # Detect country from URL TLD and profile
         country_hint = _detect_country(source_url, source_domain, profile)
@@ -569,7 +648,7 @@ def _discover_via_llm(
             max_competitors=max_competitors,
         )
 
-        # Use LangChain ChatGroq with fallback
+        # Use the shared OpenRouter wrapper with fallback.
         messages = [HumanMessage(content=prompt)]
         response = call_llm_with_fallback(messages, max_tokens=2048)
 
@@ -724,7 +803,7 @@ IMPORTANT:
 - Be strict - only accept companies that sell similar products to the source brand
 - Return ONLY the JSON array, no other text"""
 
-        # Use LangChain ChatGroq with fallback
+        # Use the shared OpenRouter wrapper with fallback.
         messages = [HumanMessage(content=prompt)]
         response = call_llm_with_fallback(messages, max_tokens=3000, temperature=0.3)
 
@@ -739,9 +818,7 @@ IMPORTANT:
 
         if not isinstance(result, list):
             logger.warning("LLM validation returned non-list: %s", text[:200])
-            return search_candidates[
-                :10
-            ], True  # Fallback to top search results + trigger fallback
+            return [], True
 
         # Process validated results
         validated = []
@@ -772,6 +849,7 @@ IMPORTANT:
                     "domain": domain,
                     "url": url if url.startswith("http") else f"https://{domain}",
                     "name": name,
+                    "source": "llm_validated",
                     "frequency": 2,  # Validation gets moderate frequency boost
                     "snippets": [item.get("reasoning", "")],
                     "titles": [name],
@@ -793,8 +871,181 @@ IMPORTANT:
         return validated, needs_fallback
     except Exception as e:
         logger.warning("LLM validation failed: %s", e)
-        # Fallback: return top search candidates and trigger fallback
-        return search_candidates[:10], True
+        return [], True
+
+
+def _build_candidate_evidence_query(profile: dict, candidate_name: str) -> str:
+    """Build a focused Tavily query for candidate verification."""
+    industry = str(profile.get("industry", "") or "").strip()
+    products = profile.get("products_services", [])
+    if isinstance(products, list):
+        product_hint = " ".join(str(p) for p in products[:3] if p).strip()
+    else:
+        product_hint = str(products or "").strip()
+    target = str(profile.get("target_customer", "") or "").strip()
+
+    context_parts = [part for part in [industry, product_hint, target] if part]
+    context = " ".join(context_parts[:3]).strip()
+    if context:
+        return f'"{candidate_name}" {context} official website'
+    return f'"{candidate_name}" official website'
+
+
+def _validate_local_candidates_with_tavily_evidence(
+    profile: dict,
+    source_url: str,
+    source_domain: str,
+    search_candidates: list[dict],
+) -> list[dict]:
+    """
+    Use Tavily evidence plus LLM reasoning to validate local competitors.
+
+    This is stricter than name-only validation: each candidate must have
+    supporting search evidence that suggests it operates in the same niche.
+    """
+    if not TAVILY_API_KEY:
+        return []
+
+    source_products = profile.get("products_services", [])
+    if isinstance(source_products, list):
+        source_products_text = ", ".join(str(p) for p in source_products[:6] if p)
+    else:
+        source_products_text = str(source_products or "")
+
+    validated: list[dict] = []
+    seen_domains: set[str] = set()
+
+    for candidate in search_candidates[:12]:
+        if not isinstance(candidate, dict):
+            continue
+
+        candidate_name = (candidate.get("name") or "").strip()
+        candidate_domain = (candidate.get("domain") or "").strip().lower()
+        if not candidate_name:
+            continue
+
+        query = _build_candidate_evidence_query(profile, candidate_name)
+        evidence_results = _tavily_search(query, max_results=5)
+        if not evidence_results:
+            logger.info("No Tavily evidence found for candidate: %s", candidate_name)
+            continue
+
+        evidence_lines: list[str] = []
+        canonical_url = candidate.get("url", "")
+        canonical_domain = candidate_domain
+
+        for result in evidence_results[:4]:
+            href = (result.get("href") or "").strip()
+            title = (result.get("title") or "").strip()
+            body = (result.get("body") or result.get("content") or "").strip()
+            domain = extract_domain(href) if href else ""
+
+            if href and domain and not _is_excluded_candidate_domain(domain, href):
+                canonical_url = href
+                canonical_domain = domain
+
+            if title or body or href:
+                evidence_lines.append(
+                    f"- domain={domain or 'unknown'} | title={title[:120]} | snippet={body[:220]}"
+                )
+
+        if (
+            not canonical_domain
+            or canonical_domain == source_domain
+            or _is_excluded_candidate_domain(canonical_domain, canonical_url)
+            or not _is_relevant_domain(canonical_domain)
+        ):
+            logger.info(
+                "Rejected local candidate %s due to weak canonical domain: %s",
+                candidate_name,
+                canonical_domain or "unknown",
+            )
+            continue
+
+        prompt = f"""You are validating whether a LOCAL competitor candidate is actually relevant.
+
+SOURCE COMPANY:
+- URL: {source_url}
+- Brand: {profile.get("brand_name", "Unknown")}
+- Industry: {profile.get("industry", "Unknown")}
+- Products/Services: {source_products_text}
+- Target Customer: {profile.get("target_customer", "Unknown")}
+
+CANDIDATE:
+- Name: {candidate_name}
+- Proposed URL: {canonical_url or f"https://{canonical_domain}"}
+- Proposed Domain: {canonical_domain}
+
+TAVILY EVIDENCE:
+{chr(10).join(evidence_lines)}
+
+Decide if this candidate is a REAL competitor in the same niche.
+Reject if it is a software tool, analytics company, marketplace, publisher, government site, generic directory, or unrelated industry.
+
+Return ONLY JSON:
+{{
+  "is_relevant": true,
+  "reasoning": "short explanation",
+  "similarity": 0.0,
+  "url": "https://example.com"
+}}"""
+
+        try:
+            response = call_llm_with_fallback(
+                [HumanMessage(content=prompt)],
+                max_tokens=512,
+                temperature=0.1,
+            )
+            text = response.content
+            if not isinstance(text, str):
+                text = str(text)
+            result = safe_json_parse(text)
+        except Exception as e:
+            logger.warning(
+                "Tavily-backed local validation failed for %s: %s",
+                candidate_name,
+                e,
+            )
+            continue
+
+        if not isinstance(result, dict) or not result.get("is_relevant", False):
+            logger.info("Rejected local candidate after Tavily validation: %s", candidate_name)
+            continue
+
+        validated_url = (result.get("url") or canonical_url or f"https://{canonical_domain}").strip()
+        validated_domain = extract_domain(validated_url) or canonical_domain
+        base_domain = _get_base_domain(validated_domain)
+
+        if (
+            not validated_domain
+            or validated_domain == source_domain
+            or _is_excluded_candidate_domain(validated_domain, validated_url)
+            or not _is_relevant_domain(validated_domain)
+            or base_domain in seen_domains
+        ):
+            continue
+
+        seen_domains.add(base_domain)
+        validated.append(
+            {
+                "domain": validated_domain,
+                "url": validated_url if validated_url.startswith("http") else f"https://{validated_domain}",
+                "name": candidate_name,
+                "source": "tavily_llm_validated",
+                "frequency": max(int(candidate.get("frequency", 2)), 3),
+                "snippets": [str(result.get("reasoning", ""))],
+                "titles": [candidate_name],
+                "llm_similarity": float(result.get("similarity", 0.5)),
+                "semantic_score": float(result.get("similarity", 0.5)),
+            }
+        )
+
+    logger.info(
+        "Tavily-backed LLM validated %d out of %d local candidates",
+        len(validated),
+        min(len(search_candidates), 12),
+    )
+    return validated
 
 
 def _generate_search_queries(
@@ -855,7 +1106,7 @@ Example for a men's clothing brand (India):
     "urban professional men's clothing brands India"
 ]"""
 
-        # Use LangChain ChatGroq with fallback
+        # Use the shared OpenRouter wrapper with fallback.
         messages = [HumanMessage(content=prompt)]
         response = call_llm_with_fallback(messages, max_tokens=1024, temperature=0.4)
 
@@ -1026,6 +1277,12 @@ def _discover_via_tavily(
                     title = result.get("title", "").lower()
                     if not href or href in seen_listing_pages:
                         continue
+                    if not _result_mentions_brand(result, brand_name, source_domain):
+                        logger.debug(
+                            "Skipping listing result without source brand match: %s",
+                            href,
+                        )
+                        continue
                     if _is_competitor_listing_page(href, title):
                         seen_listing_pages.add(href)
                         listing_pages.append(href)
@@ -1119,22 +1376,28 @@ def _discover_via_tracxn(
         return []
 
     # Search for Tracxn page - more specific query
-    tracxn_query = (
-        f'site:tracxn.com "{brand_name}" competitors OR alternatives OR company profile'
-    )
+    tracxn_query = f"tracxn {brand_name}"
     logger.info("Searching Tracxn for %s (query: %s)", brand_name, tracxn_query)
 
     try:
         results = _tavily_search(tracxn_query, max_results=10)
 
-        # Find the first tracxn.com result (but not login page)
+        # Find the first Tracxn result that actually matches the requested brand.
         tracxn_url = None
         for result in results:
             href = result.get("href", "")
-            if "tracxn.com" in href and "/login" not in href and "/signup" not in href:
-                tracxn_url = href
-                logger.info("Found Tracxn page: %s", tracxn_url)
-                break
+            if "tracxn.com" not in href or "/login" in href or "/signup" in href:
+                continue
+            if not _matches_tracxn_brand_result(result, brand_name):
+                logger.info(
+                    "Skipping unrelated Tracxn result for %s: %s",
+                    brand_name,
+                    href,
+                )
+                continue
+            tracxn_url = href
+            logger.info("Found Tracxn page: %s", tracxn_url)
+            break
 
         if not tracxn_url:
             logger.info("No Tracxn page found for %s", brand_name)
@@ -1143,10 +1406,13 @@ def _discover_via_tracxn(
         # Crawl the Tracxn page and extract competitors
         competitors = _crawl_and_extract_competitors(tracxn_url, brand_name, scope)
 
-        # Try to find websites for each competitor
+        # Try to find websites for each competitor without using Tavily.
         for comp in competitors:
             if comp.get("name"):
-                website_url, domain = _find_company_website(comp["name"])
+                website_url, domain = _find_company_website(
+                    comp["name"],
+                    comp.get("tracxn_profile_url", ""),
+                )
                 if website_url:
                     comp["url"] = website_url
                     comp["domain"] = domain
@@ -1158,6 +1424,13 @@ def _discover_via_tracxn(
             if c.get("domain")
             and not _is_excluded_candidate_domain(c.get("domain", ""), c.get("url", ""))
         ]
+
+        if competitors:
+            logger.info(
+                "Tracxn competitors for %s: %s",
+                brand_name,
+                [c.get("name", "") for c in competitors],
+            )
 
         return competitors
     except Exception as e:
@@ -1211,6 +1484,7 @@ def _extract_competitors_from_tracxn(
                             "domain": "",  # Will be resolved later
                             "url": "",
                             "name": name,
+                            "source": "tracxn",
                             "frequency": 4,  # Tracxn results get high frequency boost
                             "snippets": ["Found via Tracxn"],
                             "titles": [name],
@@ -1370,6 +1644,7 @@ def _crawl_and_extract_competitors(
         def add_candidate(
             candidate_name: str, snippet: str,
             website_url: str = "", website_domain: str = "",
+            tracxn_profile_url: str = "",
         ) -> None:
             normalized = _normalize_company_name(candidate_name)
             if not _looks_like_company_name(normalized, brand_name):
@@ -1382,6 +1657,12 @@ def _crawl_and_extract_competitors(
                         if comp.get("name", "").lower() == name_key and not comp.get("domain"):
                             comp["url"] = website_url
                             comp["domain"] = website_domain
+                        if (
+                            comp.get("name", "").lower() == name_key
+                            and tracxn_profile_url
+                            and not comp.get("tracxn_profile_url")
+                        ):
+                            comp["tracxn_profile_url"] = tracxn_profile_url
                 return
             seen.add(name_key)
             competitors.append(
@@ -1389,6 +1670,8 @@ def _crawl_and_extract_competitors(
                     "domain": website_domain,
                     "url": website_url,
                     "name": normalized,
+                    "tracxn_profile_url": tracxn_profile_url,
+                    "source": "tracxn" if "tracxn.com" in page_url.lower() else "listing",
                     "frequency": 4,
                     "snippets": [snippet],
                     "titles": [normalized],
@@ -1407,6 +1690,33 @@ def _crawl_and_extract_competitors(
             soup = BeautifulSoup(raw_html, "html.parser")
 
             if is_listing_site:
+                if "tracxn.com" in listing_domain:
+                    table_rows = soup.select("table tbody tr")
+                    for row in table_rows:
+                        company_anchor = row.select_one(
+                            'td:nth-of-type(2) a[href*="/d/companies/"]'
+                        )
+                        if not company_anchor:
+                            continue
+
+                        anchor_text = " ".join(
+                            company_anchor.get_text(" ", strip=True).split()
+                        )
+                        if not anchor_text:
+                            continue
+
+                        add_candidate(
+                            anchor_text,
+                            f"Found via Tracxn company table row: {page_url}",
+                            tracxn_profile_url=urljoin(page_url, company_anchor.get("href", "").strip()),
+                        )
+
+                    if competitors:
+                        logger.info(
+                            "Extracted %d competitors from Tracxn table rows",
+                            len(competitors),
+                        )
+
                 # On listing sites (Tracxn, etc.), look for anchor links that
                 # point to company profiles or external websites.
                 # Build a map: competitor_name -> external_website_url
@@ -1437,6 +1747,8 @@ def _crawl_and_extract_competitors(
                         token in href_lower
                         for token in ("/company", "/companies", "/d/companies", "/profile")
                     ):
+                        if "tracxn.com" in listing_domain and competitors:
+                            continue
                         add_candidate(
                             anchor_text,
                             f"Found via listing page link: {page_url}",
@@ -1517,81 +1829,162 @@ def _crawl_and_extract_competitors(
         return []
 
 
-def _find_company_website(company_name: str) -> tuple[str, str]:
-    """
-    Find the official website for a company name using Tavily search.
+def _normalize_brand_key(text: str) -> str:
+    """Normalize a brand string for loose matching."""
+    return re.sub(r"[^a-z0-9]+", "", (text or "").lower())
 
-    Args:
-        company_name: Name of the company to find
 
-    Returns:
-        Tuple of (website_url, domain), or empty strings if not found
-    """
-    if not TAVILY_API_KEY:
-        logger.warning("TAVILY_API_KEY not configured, skipping website search")
+def _extract_website_from_tracxn_profile(
+    company_name: str,
+    tracxn_profile_url: str,
+) -> tuple[str, str]:
+    """Try to resolve the official website from a Tracxn company profile page."""
+    if not tracxn_profile_url:
         return "", ""
 
+    from crawler.crawler import AdaptiveCrawler
+
     try:
-        # Search for company name + "official website"
-        query = f'"{company_name}" official website'
-        results = _tavily_search(query, max_results=10)
+        crawler = AdaptiveCrawler(max_pages=1, max_depth=0)
+        pages = _run_async(crawler.crawl(tracxn_profile_url))
+        if not pages:
+            return "", ""
 
-        for result in results:
-            href = result.get("href", "")
-            if href and "http" in href:
-                domain = extract_domain(href)
-                if not domain:
-                    continue
-                # Reject social media, excluded domains, and non-brand domains
-                if any(
-                    x in href
-                    for x in [
-                        "facebook.com",
-                        "twitter.com",
-                        "instagram.com",
-                        "linkedin.com",
-                        "wikipedia.org",
-                        "quora.com",
-                    ]
-                ):
-                    continue
-                if _is_excluded_candidate_domain(domain, href):
-                    continue
-                if not _is_relevant_domain(domain):
-                    continue
-                return href, href.replace("https://", "").replace(
-                    "http://", ""
-                ).split("/")[0]
+        raw_html = "\n".join(
+            [p.raw_html if hasattr(p, "raw_html") else "" for p in pages]
+        )
+        soup = BeautifulSoup(raw_html, "html.parser")
+        brand_key = _normalize_brand_key(company_name)
+        best_match: tuple[int, str, str] | None = None
 
-        # If no official website found, try just the company name
-        query = f'"{company_name}"'
-        results = _tavily_search(query, max_results=10)
+        for anchor in soup.find_all("a", href=True):
+            href = anchor.get("href", "").strip()
+            if not href.startswith("http"):
+                continue
 
-        for result in results:
-            href = result.get("href", "")
-            if href and "http" in href:
-                domain = (
-                    href.replace("https://", "").replace("http://", "").split("/")[0]
-                )
-                if (
-                    domain
-                    and not any(
-                        x in domain
-                        for x in [
-                            "facebook.com",
-                            "twitter.com",
-                            "instagram.com",
-                            "linkedin.com",
-                            "wikipedia.org",
-                            "quora.com",
-                        ]
-                    )
-                    and not _is_excluded_candidate_domain(domain, href)
-                    and _is_relevant_domain(domain)
-                ):
-                    return href, domain
+            domain = extract_domain(href)
+            if (
+                not domain
+                or "tracxn.com" in domain
+                or _is_excluded_candidate_domain(domain, href)
+                or not _is_relevant_domain(domain)
+            ):
+                continue
+
+            anchor_text = " ".join(anchor.get_text(" ", strip=True).split()).lower()
+            score = 0
+            if any(token in anchor_text for token in ("website", "visit", "official")):
+                score += 3
+            if brand_key and brand_key in _normalize_brand_key(f"{href} {anchor_text}"):
+                score += 2
+
+            if best_match is None or score > best_match[0]:
+                best_match = (score, href, domain)
+
+        if best_match:
+            return best_match[1], best_match[2]
     except Exception as e:
-        logger.warning("Failed to find website for %s: %s", company_name, e)
+        logger.debug(
+            "Could not resolve website from Tracxn profile %s for %s: %s",
+            tracxn_profile_url,
+            company_name,
+            e,
+        )
+
+    return "", ""
+
+
+def _generate_domain_candidates(company_name: str) -> list[str]:
+    """Generate likely homepage domains from a company name."""
+    words = re.findall(r"[a-z0-9]+", (company_name or "").lower())
+    if not words:
+        return []
+
+    stop_words = {"the", "and", "of", "for", "india"}
+    compact = "".join(words)
+    without_stops = "".join(word for word in words if word not in stop_words)
+    hyphenated = "-".join(words)
+    variants = [compact, without_stops, hyphenated]
+
+    candidates: list[str] = []
+    seen: set[str] = set()
+    for variant in variants:
+        variant = variant.strip("-")
+        if not variant or variant in seen:
+            continue
+        seen.add(variant)
+        for suffix in (".com", ".in", ".co.in", ".net"):
+            candidates.append(f"https://{variant}{suffix}")
+    return candidates
+
+
+def _verify_homepage_candidate(company_name: str, url: str) -> tuple[str, str]:
+    """Verify whether a guessed homepage likely belongs to the target company."""
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+        )
+    }
+
+    try:
+        response = requests.get(url, timeout=8, headers=headers, allow_redirects=True)
+        if response.status_code >= 400:
+            return "", ""
+
+        final_url = response.url
+        domain = extract_domain(final_url)
+        if (
+            not domain
+            or _is_excluded_candidate_domain(domain, final_url)
+            or not _is_relevant_domain(domain)
+        ):
+            return "", ""
+
+        content_type = response.headers.get("content-type", "").lower()
+        if "html" not in content_type:
+            return "", ""
+
+        text = re.sub(r"\s+", " ", response.text[:6000]).lower()
+        brand_key = _normalize_brand_key(company_name)
+        words = [w for w in re.findall(r"[a-z0-9]+", company_name.lower()) if len(w) > 2]
+        matched_words = sum(1 for w in words if w in text)
+
+        if brand_key and brand_key in _normalize_brand_key(text):
+            return final_url, domain
+        if matched_words >= min(2, len(words)) and "domain for sale" not in text:
+            return final_url, domain
+    except Exception:
+        return "", ""
+
+    return "", ""
+
+
+def _find_company_website(
+    company_name: str,
+    tracxn_profile_url: str = "",
+) -> tuple[str, str]:
+    """
+    Find a likely official website without using Tavily.
+
+    Order:
+    1. Parse the company's Tracxn profile for an external website.
+    2. Guess common domains from the brand name and verify the homepage.
+    """
+    website_url, domain = _extract_website_from_tracxn_profile(
+        company_name,
+        tracxn_profile_url,
+    )
+    if website_url:
+        return website_url, domain
+
+    for candidate_url in _generate_domain_candidates(company_name):
+        verified_url, verified_domain = _verify_homepage_candidate(
+            company_name,
+            candidate_url,
+        )
+        if verified_url:
+            return verified_url, verified_domain
 
     return "", ""
 
@@ -1680,6 +2073,8 @@ def _merge_results(
     llm_candidates: list[dict],
     ddg_candidates: list[dict],
     source_domain: str,
+    preferred_candidates: list[dict] | None = None,
+    allow_raw_fill: bool = True,
 ) -> list[dict]:
     """Merge LLM-validated and search results, deduplicating by domain and name.
 
@@ -1710,12 +2105,16 @@ def _merge_results(
             return True
         return False
 
-    # LLM-validated results first (higher priority)
+    # Trusted source-specific results first (for example, direct Tracxn matches).
+    for c in preferred_candidates or []:
+        _try_add(c)
+
+    # LLM-validated results next.
     for c in llm_candidates:
         _try_add(c)
 
     # Only add raw search candidates if LLM validation returned very few
-    if len(merged) < 3:
+    if allow_raw_fill and len(merged) < 3:
         for c in ddg_candidates:
             _try_add(c)
 
@@ -1788,6 +2187,121 @@ Return ONLY a JSON object:
 {{"relevant": true/false, "reason": "One sentence explanation"}}"""
 
 
+_RELEVANCE_STOPWORDS = {
+    "and",
+    "the",
+    "for",
+    "with",
+    "that",
+    "this",
+    "from",
+    "into",
+    "their",
+    "they",
+    "them",
+    "brand",
+    "brands",
+    "company",
+    "companies",
+    "product",
+    "products",
+    "service",
+    "services",
+    "customer",
+    "customers",
+}
+
+
+def _tokenize_relevance_text(value) -> set[str]:
+    """Extract meaningful lowercase tokens from profile text/list fields."""
+    if isinstance(value, list):
+        text = " ".join(str(item) for item in value if item)
+    else:
+        text = str(value or "")
+
+    return {
+        token
+        for token in re.findall(r"[a-z0-9]+", text.lower())
+        if len(token) > 2 and token not in _RELEVANCE_STOPWORDS
+    }
+
+
+def _heuristic_relevance_fallback(
+    source_profile: dict,
+    competitor_profile: dict,
+) -> dict:
+    """Fallback relevance check when the LLM response is empty or unparsable."""
+    source_industry = _tokenize_relevance_text(source_profile.get("industry", ""))
+    candidate_industry = _tokenize_relevance_text(
+        competitor_profile.get("industry", "")
+    )
+    source_products = _tokenize_relevance_text(
+        source_profile.get("products_services", [])
+    )
+    candidate_products = _tokenize_relevance_text(
+        competitor_profile.get("products_services", [])
+    )
+    source_target = _tokenize_relevance_text(
+        source_profile.get("target_customer", "")
+    )
+    candidate_target = _tokenize_relevance_text(
+        competitor_profile.get("target_customer", "")
+    )
+
+    source_context = (
+        source_industry
+        | source_products
+        | source_target
+        | _tokenize_relevance_text(source_profile.get("positioning_statement", ""))
+        | _tokenize_relevance_text(source_profile.get("value_proposition", ""))
+    )
+    candidate_context = (
+        candidate_industry
+        | candidate_products
+        | candidate_target
+        | _tokenize_relevance_text(competitor_profile.get("positioning_statement", ""))
+        | _tokenize_relevance_text(competitor_profile.get("value_proposition", ""))
+    )
+
+    industry_overlap = source_industry & candidate_industry
+    product_overlap = source_products & candidate_products
+    total_overlap = source_context & candidate_context
+
+    relevant = False
+    if industry_overlap and (product_overlap or len(total_overlap) >= 4):
+        relevant = True
+    elif len(product_overlap) >= 2 and len(total_overlap) >= 4:
+        relevant = True
+    elif len(total_overlap) >= 6:
+        relevant = True
+
+    overlap_preview = ", ".join(sorted(list(total_overlap))[:6]) or "none"
+    reason = (
+        "Heuristic fallback accepted candidate after relevance LLM parsing failed; "
+        f"shared signals: {overlap_preview}."
+        if relevant
+        else "Heuristic fallback rejected candidate because profile overlap was too weak."
+    )
+    return {"relevant": relevant, "reason": reason}
+
+
+@retry_with_backoff(max_retries=2, base_delay=1.5)
+def _call_relevance_validation(prompt: str) -> dict:
+    """Call the LLM for relevance validation and require parseable JSON."""
+    messages = [HumanMessage(content=prompt)]
+    response = call_llm_with_fallback(messages, max_tokens=256, temperature=0.1)
+
+    text = response.content
+    if not isinstance(text, str):
+        text = str(text)
+
+    result = safe_json_parse(text)
+    if result and isinstance(result, dict) and "relevant" in result:
+        return result
+
+    raise ValueError(f"Could not parse relevance response: {text[:200]}")
+
+
 def validate_competitor_relevance(
     source_profile: dict,
     competitor_profile: dict,
@@ -1821,7 +2335,34 @@ def validate_competitor_relevance(
             candidate_target=competitor_profile.get("target_customer", "Unknown"),
         )
 
-        # Use LangChain ChatGroq with fallback
+        try:
+            result = _call_relevance_validation(prompt)
+            logger.info(
+                "Relevance check for %s: %s â€” %s",
+                competitor_profile.get("brand_name", "Unknown"),
+                result.get("relevant"),
+                result.get("reason", ""),
+            )
+            return result
+        except Exception as parse_err:
+            logger.warning(
+                "Relevance validation failed for %s: %s â€” using heuristic fallback",
+                competitor_profile.get("brand_name", "Unknown"),
+                parse_err,
+            )
+            fallback = _heuristic_relevance_fallback(
+                source_profile,
+                competitor_profile,
+            )
+            logger.info(
+                "Heuristic relevance for %s: %s â€” %s",
+                competitor_profile.get("brand_name", "Unknown"),
+                fallback.get("relevant"),
+                fallback.get("reason", ""),
+            )
+            return fallback
+
+        # Use the shared OpenRouter wrapper with fallback.
         messages = [HumanMessage(content=prompt)]
         response = call_llm_with_fallback(messages, max_tokens=256, temperature=0.1)
 

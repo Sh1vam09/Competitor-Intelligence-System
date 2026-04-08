@@ -4,8 +4,8 @@ Full Pipeline Orchestrator.
 Orchestrates the complete competitor intelligence pipeline:
     1. Crawl the input website
     2. Process content (clean text, extract DOM features)
-    3. Visual analysis via Gemini Vision
-    4. Structured business extraction via Gemini
+    3. Visual analysis via OpenRouter vision
+    4. Structured business extraction via OpenRouter
     5. Generate embeddings
     6. Discover competitors via Tavily
     7. Crawl and analyze each competitor
@@ -45,6 +45,7 @@ from utils.config import (
     MAX_LOCAL_CANDIDATES,
     MAX_GLOBAL_CANDIDATES,
     COMPETITOR_CRAWL_DELAY,
+    COMPETITOR_CRAWL_CONCURRENCY,
 )
 from utils.helpers import extract_domain
 from utils.logger import get_logger
@@ -167,7 +168,7 @@ class PipelineOrchestrator:
             visual_profile = self._analyze_visuals(pages)
 
             # ── Step 4: Business extraction ────────────────────────────────
-            self._update_status("Extracting business profile via Gemini...")
+            self._update_status("Extracting business profile via OpenRouter...")
             business_profile = extract_business_profile(
                 all_text_chunks, combined_dom_features
             )
@@ -616,8 +617,8 @@ class PipelineOrchestrator:
             parent_company.embedding_vector
         )
 
-        # Process in batches of 3-4 competitors at a time
-        BATCH_SIZE = 3
+        # Limit concurrent Chromium instances to avoid piling up headless shells.
+        BATCH_SIZE = max(1, COMPETITOR_CRAWL_CONCURRENCY)
         semaphore = asyncio.Semaphore(BATCH_SIZE)
 
         async def process_with_semaphore(idx: int, candidate: dict, total: int) -> dict:

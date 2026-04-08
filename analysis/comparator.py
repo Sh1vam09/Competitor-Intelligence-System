@@ -1,7 +1,7 @@
 """
 Comparative Intelligence Analysis Module.
 
-Uses Groq (via LangChain) to generate structured competitive analysis
+Uses OpenRouter (via LangChain) to generate structured competitive analysis
 comparing the input company against discovered competitors.
 Produces strategic insights, gap analysis, and recommendations.
 """
@@ -10,7 +10,7 @@ import json
 
 from langchain_core.messages import HumanMessage
 
-from utils.config import GROQ_API_KEY, GROQ_MODEL, GROQ_MAX_RETRIES
+from utils.config import OPENROUTER_MAX_RETRIES
 from utils.helpers import safe_json_parse, retry_with_backoff, truncate_text
 from utils.llm_wrapper import call_llm_with_fallback
 from utils.logger import get_logger
@@ -101,7 +101,7 @@ def generate_comparative_analysis(
 ) -> dict:
     """
     Generate a comprehensive comparative intelligence analysis
-    using Groq Llama.
+    using the configured OpenRouter model.
 
     Args:
         input_profile: Structured business profile of the input company.
@@ -131,14 +131,14 @@ def generate_comparative_analysis(
     )
 
 
-@retry_with_backoff(max_retries=GROQ_MAX_RETRIES, base_delay=3.0)
+@retry_with_backoff(max_retries=OPENROUTER_MAX_RETRIES, base_delay=3.0)
 def _call_llm_comparison(
     input_profile: str,
     input_visual: str,
     competitor_profiles: str,
 ) -> dict:
     """
-    Call Groq Llama for comparative analysis.
+    Call the configured OpenRouter model for comparative analysis.
 
     Raises:
         ValueError: If response is malformed after all repair attempts.
@@ -149,7 +149,7 @@ def _call_llm_comparison(
         competitor_profiles=competitor_profiles,
     )
 
-    # Use LangChain ChatGroq with fallback
+    # Use the shared OpenRouter wrapper with fallback.
     messages = [HumanMessage(content=prompt)]
     response = call_llm_with_fallback(messages, max_tokens=16384, temperature=0.2)
 
@@ -231,7 +231,7 @@ Write in a professional, analytical tone. Be specific and data-driven.
 Do not use markdown formatting. Do not introduce new claims or recommendations beyond the provided analysis.
 Return only the summary text, no JSON."""
 
-        # Use LangChain ChatGroq with fallback
+        # Use the shared OpenRouter wrapper with fallback.
         messages = [HumanMessage(content=prompt)]
         response = call_llm_with_fallback(messages, max_tokens=1024, temperature=0.3)
         return response.content.strip()

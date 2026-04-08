@@ -62,7 +62,7 @@ URL Input
 +------------+  +---------------+  +--------------+
 | Visual     |  | Business      |  | Embeddings  |
 | Analysis   |  | Extraction    |  | (Jina v5)   |
-| (Groq)     |  | (Groq)        |  +------------+
+| (OpenRouter)      |  | (OpenRouter)        |  +------------+
 | Screenshot |  | Structured    |         |
 | to profile |  | JSON profile  |         v
 +------------+  +---------------+  +--------------+
@@ -131,7 +131,7 @@ URL Input
 | Technology | Purpose |
 |------------|---------|
 | LangChain | LLM orchestration |
-| Groq (via LangChain) | LLM inference |
+| OpenRouter (via LangChain) | LLM inference |
 | Jina Embeddings v5 | Text embeddings |
 | Pinecone | Vector database |
 
@@ -163,16 +163,14 @@ URL Input
 The system uses a multi-stage approach for finding competitors based on scope:
 
 **For Local Competitors (India):**
-- Searches Tracxn for the brand's company page
-- Crawls the Tracxn page and extracts competitor names **and website URLs** directly from the page HTML
-- Uses Tavily to discover additional competitor-listing pages (Growjo, Similarweb)
-- For competitors without a website URL, falls back to Tavily website lookup with hardened domain filtering
+- Uses Tavily only to locate the correct Tracxn company page for the source brand
+- Crawls the Tracxn page and extracts competitor names from the competitor table
+- Resolves competitor websites from Tracxn profile pages or direct homepage verification
 - Deduplicates local and global competitors by base domain and name
 
 **For Global Competitors:**
-- Uses Tavily to search competitor-listing sources (Similarweb, Ahrefs, Growjo)
-- Crawls multiple relevant listing pages and extracts competitor names + external website links
-- Falls back to LLM discovery if insufficient candidates found
+- Uses LLM-only discovery to generate global competitor candidates
+- Skips Tavily and Tracxn entirely for global scope
 
 **For Both Scopes:**
 - LLM validates all discovered competitors; only validated results are used in final ranking
@@ -201,7 +199,7 @@ The system uses Jina embeddings v5 for semantic representation and Pinecone for 
 
 ### 4. LLM-Powered Analysis
 
-All AI analysis uses Groq models via LangChain:
+All AI analysis uses OpenRouter models via LangChain:
 
 - **Business Extraction**: Structured JSON from website content
 - **Visual Analysis**: Screenshot analysis for brand personality
@@ -212,22 +210,22 @@ All AI analysis uses Groq models via LangChain:
 
 The system includes automatic fallback to ensure reliability:
 
-**Primary Model:** `openai/gpt-oss-120b` (high capability)
+**Primary Model:** `openai/gpt-4.1-mini` (high capability)
 
-**Fallback Model:** `llama-3.3-70b-versatile` (used when rate limited)
+**Fallback Model:** `google/gemini-2.5-flash` (used when rate limited)
 
 **How It Works:**
-1. Request goes to primary model (GPT-OSS-120b)
-2. If rate limit error (429) is encountered, automatically switches to Llama 70b
+1. Request goes to primary model (GPT-4.1-mini)
+2. If rate limit error (429) is encountered, automatically switches to Gemini 2.5 Flash
 3. If fallback also fails, raises exception
 4. All LLM calls across the system use this wrapper
 
 **Configuration:**
 ```env
-GROQ_API_KEY="your_key"
-GROQ_MODEL="openai/gpt-oss-120b"
-GROQ_FALLBACK_MODEL="llama-3.3-70b-versatile"
-GROQ_VISION_MODEL="meta-llama/llama-4-scout-17b-16e-instruct"
+OPENROUTER_API_KEY="your_key"
+OPENROUTER_MODEL="openai/gpt-4.1-mini"
+OPENROUTER_FALLBACK_MODEL="google/gemini-2.5-flash"
+OPENROUTER_VISION_MODEL="google/gemini-2.5-flash"
 TAVILY_API_KEY="tvly-xxx"
 ```
 
@@ -241,7 +239,7 @@ TAVILY_API_KEY="tvly-xxx"
 
 - Python 3.10 or higher
 - API keys for:
-  - Groq (LLM inference)
+  - OpenRouter (LLM inference)
   - Pinecone (vector database)
   - Jina (embeddings)
   - Tavily (search)
@@ -264,11 +262,11 @@ pip install -r requirements.txt
 Create a `.env` file in the project root:
 
 ```env
-# Groq API
-GROQ_API_KEY=your_groq_api_key_here
-GROQ_MODEL=openai/gpt-oss-120b
-GROQ_FALLBACK_MODEL=llama-3.3-70b-versatile
-GROQ_VISION_MODEL=meta-llama/llama-4-scout-17b-16e-instruct
+# OpenRouter API
+OPENROUTER_API_KEY=your_openrouter_api_key_here
+OPENROUTER_MODEL=openai/gpt-4.1-mini
+OPENROUTER_FALLBACK_MODEL=google/gemini-2.5-flash
+OPENROUTER_VISION_MODEL=google/gemini-2.5-flash
 
 # Tavily Search
 TAVILY_API_KEY=your_tavily_api_key_here
@@ -438,7 +436,7 @@ Competitor/
 │   ├── dom_analyzer.py            # DOM structure analysis
 │
 ├── vision/
-│   ├── visual_analyzer.py         # Screenshot analysis with Groq
+│   ├── visual_analyzer.py         # Screenshot analysis with OpenRouter
 │
 ├── extraction/
 │   ├── business_extractor.py      # Structured business profile extraction
@@ -473,10 +471,10 @@ Competitor/
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `GROQ_API_KEY` | Yes | - | Groq API key for LLM |
-| `GROQ_MODEL` | No | `meta-llama/llama-3.1-8b-instruct` | Primary Groq model override |
-| `GROQ_FALLBACK_MODEL` | No | `llama-3.3-70b-versatile` | Fallback Groq model |
-| `GROQ_VISION_MODEL` | No | `meta-llama/llama-3.2-11b-vision-preview` | Groq vision model override |
+| `OPENROUTER_API_KEY` | Yes | - | OpenRouter API key for LLM |
+| `OPENROUTER_MODEL` | No | `xiaomi/mimo-v2-pro` | Primary OpenRouter model override |
+| `OPENROUTER_FALLBACK_MODEL` | No | `google/gemma-4-31b-it:free` | Fallback OpenRouter model |
+| `OPENROUTER_VISION_MODEL` | No | `google/gemma-4-31b-it:free` | OpenRouter vision model override |
 | `TAVILY_API_KEY` | Yes | - | Tavily API key for search |
 | `TAVILY_SEARCH_DEPTH` | No | `advanced` | Tavily search depth |
 | `PINECONE_API_KEY` | Yes | - | Pinecone API key |
@@ -497,7 +495,7 @@ Competitor/
 ### Key Settings
 
 **Text Processing:**
-- **Chunk Size**: 1200 tokens (optimal for Groq context window)
+- **Chunk Size**: 1200 tokens (optimal for OpenRouter context window)
 - **Overlap**: 200 tokens (maintains semantic continuity)
 - **Min Chunk**: 100 tokens (discard very small chunks)
 
@@ -583,14 +581,14 @@ competitors = discover_competitors(
 
 ### LLM Rate Limits
 
-**Problem:** Too many requests to Groq API causing rate limit errors
+**Problem:** Too many requests to OpenRouter API causing rate limit errors
 
 **Solution:**
-1. System includes automatic fallback to Llama 70b model
-2. Primary model: GPT-OSS-120b (high capability)
-3. Fallback model: Llama 3.1 70b (used when rate limited)
+1. System includes automatic fallback to Gemini 2.5 Flash model
+2. Primary model: GPT-4.1-mini (high capability)
+3. Fallback model: Gemini 2.5 Flash (used when rate limited)
 4. System automatically switches models on rate limit error
-5. Adjust `GROQ_MAX_RETRIES` and `GROQ_RETRY_DELAY` in `.env` for fine-tuning
+5. Adjust `OPENROUTER_MAX_RETRIES` and `OPENROUTER_RETRY_DELAY` in `.env` for fine-tuning
 
 ### Crawling Timeouts
 

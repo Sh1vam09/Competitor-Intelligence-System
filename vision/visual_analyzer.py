@@ -1,7 +1,7 @@
 """
 Visual Intelligence Module.
 
-Sends homepage screenshots to Groq (via LangChain) Vision to extract
+Sends homepage screenshots to OpenRouter vision models to extract
 a structured visual brand profile including color psychology,
 design modernity, trust signals, and emotional tone.
 """
@@ -10,22 +10,42 @@ import base64
 import json
 from pathlib import Path
 
-from langchain_groq import ChatGroq
+from langchain_openai import ChatOpenAI
 from langchain_core.messages import HumanMessage
-from pydantic import SecretStr
 
-from utils.config import GROQ_API_KEY, GROQ_VISION_MODEL, GROQ_MAX_RETRIES
+from utils.config import (
+    OPENROUTER_API_KEY,
+    OPENROUTER_BASE_URL,
+    OPENROUTER_VISION_MODEL,
+    OPENROUTER_MAX_RETRIES,
+    OPENROUTER_APP_NAME,
+    OPENROUTER_HTTP_REFERER,
+)
 from utils.helpers import safe_json_parse, retry_with_backoff
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
 
-# Initialize vision LLM client (separate from text wrapper)
-vision_llm = ChatGroq(
-    api_key=SecretStr(GROQ_API_KEY) if GROQ_API_KEY else None,
-    model=GROQ_VISION_MODEL,
-    temperature=0.2,
-)
+_vision_headers = {}
+if OPENROUTER_HTTP_REFERER:
+    _vision_headers["HTTP-Referer"] = OPENROUTER_HTTP_REFERER
+if OPENROUTER_APP_NAME:
+    _vision_headers["X-Title"] = OPENROUTER_APP_NAME
+
+
+def _build_vision_llm() -> ChatOpenAI:
+    """Create the OpenRouter vision client lazily to avoid import-time crashes."""
+    if not OPENROUTER_API_KEY:
+        raise ValueError(
+            "Missing OpenRouter API key. Set OPENROUTER_API_KEY in .env."
+        )
+    return ChatOpenAI(
+        api_key=OPENROUTER_API_KEY or None,
+        base_url=OPENROUTER_BASE_URL,
+        model=OPENROUTER_VISION_MODEL,
+        temperature=0.2,
+        default_headers=_vision_headers or None,
+    )
 
 # Required keys in the visual profile output
 VISUAL_PROFILE_KEYS = [
@@ -57,7 +77,7 @@ IMPORTANT: Return ONLY the JSON object. No markdown, no explanations, no code fe
 
 def analyze_screenshot(screenshot_path: str) -> dict:
     """
-    Analyze a website screenshot using Groq Llama Vision.
+    Analyze a website screenshot using an OpenRouter vision model.
 
     Args:
         screenshot_path: Path to the screenshot image file.
@@ -69,13 +89,20 @@ def analyze_screenshot(screenshot_path: str) -> dict:
         logger.warning("Screenshot not found: %s", screenshot_path)
         return _empty_visual_profile()
 
+    if not OPENROUTER_API_KEY:
+        logger.warning(
+            "OpenRouter vision disabled because no API key is configured; "
+            "returning empty visual profile"
+        )
+        return _empty_visual_profile()
+
     return _call_vision(screenshot_path)
 
 
-@retry_with_backoff(max_retries=GROQ_MAX_RETRIES, base_delay=2.0)
+@retry_with_backoff(max_retries=OPENROUTER_MAX_RETRIES, base_delay=2.0)
 def _call_vision(screenshot_path: str) -> dict:
     """
-    Call Groq Vision API with the screenshot and parse the result.
+    Call the OpenRouter vision API with the screenshot and parse the result.
 
     Args:
         screenshot_path: Path to the screenshot image file.
@@ -100,7 +127,7 @@ def _call_vision(screenshot_path: str) -> dict:
     }
     mime_type = mime_map.get(ext, "image/png")
 
-    # Use LangChain ChatGroq with image content
+    # Use LangChain ChatOpenAI against OpenRouter with image content.
     messages = [
         HumanMessage(
             content=[
@@ -114,7 +141,7 @@ def _call_vision(screenshot_path: str) -> dict:
             ]
         )
     ]
-    response = vision_llm.invoke(messages, max_tokens=1024)
+    response = _build_vision_llm().invoke(messages, max_tokens=1024)
 
     text = response.content
     result = safe_json_parse(text)

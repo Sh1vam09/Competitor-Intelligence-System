@@ -493,6 +493,45 @@ def _wrap(text: str, max_len: int = 0) -> str:
     return _escape(text)
 
 
+def _has_display_value(value) -> bool:
+    """Return True when a profile field has meaningful content for the PDF."""
+    if value is None:
+        return False
+    if isinstance(value, str):
+        normalized = value.strip()
+        return bool(normalized) and normalized.lower() not in {"n/a", "not detected"}
+    if isinstance(value, list):
+        return any(_has_display_value(item) for item in value)
+    return True
+
+
+def _append_list_field(
+    elements: list,
+    label: str,
+    values,
+    max_items: int = 4,
+) -> None:
+    """Append a list-style profile field to the PDF if it has usable values."""
+    if not isinstance(values, list):
+        values = [values] if _has_display_value(values) else []
+
+    cleaned = []
+    for item in values:
+        if not _has_display_value(item):
+            continue
+        cleaned.append(str(item).strip())
+        if len(cleaned) >= max_items:
+            break
+
+    if not cleaned:
+        return
+
+    joined = "; ".join(_escape(item) for item in cleaned)
+    elements.append(
+        Paragraph(f"<b>{_escape(label)}:</b> {joined}", styles["BodyJustified"])
+    )
+
+
 def _build_profile_section(profile: dict) -> list:
     """Build the business profile table."""
     elements = []
@@ -656,20 +695,47 @@ def _build_competitor_profiles(competitors: list[dict]) -> list:
         profile = comp.get("profile", {})
         if profile:
             key_items = [
+                ("Website", comp.get("url")),
+                (
+                    "Similarity Score",
+                    f"{comp.get('similarity_score', 0):.2f}"
+                    if comp.get("similarity_score") is not None
+                    else None,
+                ),
                 ("Industry", profile.get("industry")),
                 ("Target Customer", profile.get("target_customer")),
                 ("Value Proposition", profile.get("value_proposition")),
                 ("Pricing Model", profile.get("pricing_model")),
                 ("Positioning", profile.get("positioning_statement")),
+                ("Brand Tone", profile.get("brand_tone")),
+                ("Geography Focus", profile.get("geography_focus")),
+                ("Marketing Style", profile.get("marketing_style")),
+                ("Monetization", profile.get("monetization_model")),
             ]
             for label, value in key_items:
-                if value and value != "Not detected":
+                if _has_display_value(value):
                     elements.append(
                         Paragraph(
                             f"<b>{label}:</b> {_wrap(str(value), 150)}",
                             styles["BodyJustified"],
                         )
                     )
+
+            _append_list_field(
+                elements,
+                "Products/Services",
+                profile.get("products_services"),
+            )
+            _append_list_field(
+                elements,
+                "Key Features",
+                profile.get("key_features"),
+            )
+            _append_list_field(
+                elements,
+                "Differentiators",
+                profile.get("differentiation_claims"),
+            )
         else:
             elements.append(
                 Paragraph("Profile data not available.", styles["BodyJustified"])

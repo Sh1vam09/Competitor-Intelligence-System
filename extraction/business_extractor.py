@@ -1,7 +1,7 @@
 """
 Structured Business Extraction Module.
 
-Uses Groq (via LangChain) to extract a comprehensive structured business profile
+Uses OpenRouter (via LangChain) to extract a comprehensive structured business profile
 from crawled and processed website text. Enforces strict JSON schema
 validation with retry on malformed output.
 """
@@ -10,7 +10,7 @@ import json
 
 from langchain_core.messages import HumanMessage
 
-from utils.config import GROQ_API_KEY, GROQ_MODEL, GROQ_MAX_RETRIES
+from utils.config import OPENROUTER_MAX_RETRIES
 from utils.helpers import safe_json_parse, retry_with_backoff, truncate_text
 from utils.llm_wrapper import call_llm_with_fallback
 from utils.logger import get_logger
@@ -72,7 +72,48 @@ IMPORTANT RULES:
 1. Return ONLY the JSON object. No markdown, no explanations, no code fences.
 2. If information is not available, use "Not detected" for strings, empty list [] for arrays, and 5.0 for scores.
 3. Be specific and evidence-based — quote from the content where possible.
-4. products_services, key_features, differentiation_claims, and tech_stack_detected MUST be arrays."""
+4. products_services, key_features, differentiation_claims, and tech_stack_detected MUST be arrays.
+5. Keep every field concise. Do not include long quotes or long product lists.
+6. Always include all keys, even when the value is "Not detected" or []."""
+
+
+def _normalize_business_profile(result: dict) -> dict:
+    """Fill missing fields with safe defaults and normalize output types."""
+    normalized = _empty_business_profile()
+    if isinstance(result, dict):
+        normalized.update(result)
+
+    array_fields = [
+        "products_services",
+        "key_features",
+        "differentiation_claims",
+        "tech_stack_detected",
+    ]
+    for field in array_fields:
+        value = normalized.get(field)
+        if isinstance(value, list):
+            normalized[field] = [str(item).strip() for item in value if str(item).strip()]
+        elif value in (None, "", "Not detected"):
+            normalized[field] = []
+        else:
+            normalized[field] = [str(value).strip()]
+
+    score = normalized.get("CTA_aggressiveness_score", 5.0)
+    try:
+        normalized["CTA_aggressiveness_score"] = float(score)
+    except (TypeError, ValueError):
+        normalized["CTA_aggressiveness_score"] = 5.0
+
+    for key in BUSINESS_PROFILE_KEYS:
+        if key == "CTA_aggressiveness_score" or key in array_fields:
+            continue
+        value = normalized.get(key)
+        if value is None or value == "":
+            normalized[key] = "Not detected"
+        else:
+            normalized[key] = str(value).strip()
+
+    return normalized
 
 
 def extract_business_profile(
@@ -98,10 +139,10 @@ def extract_business_profile(
     return _call_llm_extraction(combined_text, dom_features_str)
 
 
-@retry_with_backoff(max_retries=GROQ_MAX_RETRIES, base_delay=2.0)
+@retry_with_backoff(max_retries=OPENROUTER_MAX_RETRIES, base_delay=2.0)
 def _call_llm_extraction(content: str, dom_features: str) -> dict:
     """
-    Call Groq Llama API for structured business extraction.
+    Call the configured OpenRouter model for structured business extraction.
 
     Args:
         content: Combined website text content.
@@ -118,30 +159,21 @@ def _call_llm_extraction(content: str, dom_features: str) -> dict:
         dom_features=dom_features,
     )
 
-    # Use LangChain ChatGroq with fallback
+    # Use the shared OpenRouter wrapper with fallback.
     messages = [HumanMessage(content=prompt)]
-    response = call_llm_with_fallback(messages, max_tokens=2048, temperature=0.1)
+    response = call_llm_with_fallback(
+        messages,
+        max_tokens=2048,
+        temperature=0.1,
+        response_format={"type": "json_object"},
+    )
 
     text = response.content
     result = safe_json_parse(text)
     if result is None:
         raise ValueError(f"Failed to parse LLM extraction response: {text[:300]}")
 
-    # Validate required keys
-    missing = [k for k in BUSINESS_PROFILE_KEYS if k not in result]
-    if missing:
-        raise ValueError(f"Missing keys in business profile: {missing}")
-
-    # Ensure array fields are actually arrays
-    array_fields = [
-        "products_services",
-        "key_features",
-        "differentiation_claims",
-        "tech_stack_detected",
-    ]
-    for field in array_fields:
-        if not isinstance(result.get(field), list):
-            result[field] = [result[field]] if result.get(field) else []
+    result = _normalize_business_profile(result)
 
     logger.info("Business profile extracted: %s", result.get("brand_name", "Unknown"))
     return result
@@ -155,7 +187,7 @@ def _empty_business_profile() -> dict:
 """
 Structured Business Extraction Module.
 
-Uses Groq (via LangChain) to extract a comprehensive structured business profile
+Uses OpenRouter (via LangChain) to extract a comprehensive structured business profile
 from crawled and processed website text. Enforces strict JSON schema
 validation with retry on malformed output.
 """
@@ -164,7 +196,7 @@ import json
 
 from langchain_core.messages import HumanMessage
 
-from utils.config import GROQ_API_KEY, GROQ_MODEL, GROQ_MAX_RETRIES
+from utils.config import OPENROUTER_MAX_RETRIES
 from utils.helpers import safe_json_parse, retry_with_backoff, truncate_text
 from utils.llm_wrapper import call_llm_with_fallback
 from utils.logger import get_logger
@@ -226,7 +258,9 @@ IMPORTANT RULES:
 1. Return ONLY the JSON object. No markdown, no explanations, no code fences.
 2. If information is not available, use "Not detected" for strings, empty list [] for arrays, and 5.0 for scores.
 3. Be specific and evidence-based — quote from the content where possible.
-4. products_services, key_features, differentiation_claims, and tech_stack_detected MUST be arrays."""
+4. products_services, key_features, differentiation_claims, and tech_stack_detected MUST be arrays.
+5. Keep every field concise. Do not include long quotes or long product lists.
+6. Always include all keys, even when the value is "Not detected" or []."""
 
 
 def extract_business_profile(
@@ -252,10 +286,10 @@ def extract_business_profile(
     return _call_llm_extraction(combined_text, dom_features_str)
 
 
-@retry_with_backoff(max_retries=GROQ_MAX_RETRIES, base_delay=2.0)
+@retry_with_backoff(max_retries=OPENROUTER_MAX_RETRIES, base_delay=2.0)
 def _call_llm_extraction(content: str, dom_features: str) -> dict:
     """
-    Call Groq Llama API for structured business extraction.
+    Call the configured OpenRouter model for structured business extraction.
 
     Args:
         content: Combined website text content.
@@ -272,30 +306,21 @@ def _call_llm_extraction(content: str, dom_features: str) -> dict:
         dom_features=dom_features,
     )
 
-    # Use LangChain ChatGroq with fallback
+    # Use the shared OpenRouter wrapper with fallback.
     messages = [HumanMessage(content=prompt)]
-    response = call_llm_with_fallback(messages, max_tokens=2048, temperature=0.1)
+    response = call_llm_with_fallback(
+        messages,
+        max_tokens=2048,
+        temperature=0.1,
+        response_format={"type": "json_object"},
+    )
 
     text = response.content
     result = safe_json_parse(text)
     if result is None:
         raise ValueError(f"Failed to parse LLM extraction response: {text[:300]}")
 
-    # Validate required keys
-    missing = [k for k in BUSINESS_PROFILE_KEYS if k not in result]
-    if missing:
-        raise ValueError(f"Missing keys in business profile: {missing}")
-
-    # Ensure array fields are actually arrays
-    array_fields = [
-        "products_services",
-        "key_features",
-        "differentiation_claims",
-        "tech_stack_detected",
-    ]
-    for field in array_fields:
-        if not isinstance(result.get(field), list):
-            result[field] = [result[field]] if result.get(field) else []
+    result = _normalize_business_profile(result)
 
     logger.info("Business profile extracted: %s", result.get("brand_name", "Unknown"))
     return result
