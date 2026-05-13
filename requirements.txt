@@ -23,15 +23,9 @@ pinecone>=5.0.0
 # Database
 sqlalchemy==2.0.36
 
-# Text Processing
-transformers>=4.30.0
-
 # Report Generation
 reportlab==4.2.5
 Pillow==11.1.0
-
-# Frontend
-streamlit==1.41.1
 
 # Async Utilities
 nest-asyncio==1.6.0

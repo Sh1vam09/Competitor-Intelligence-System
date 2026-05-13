@@ -4,7 +4,7 @@ services:
       context: .
       dockerfile: Dockerfile
     container_name: competitor-intelligence-api
-    command: ["uvicorn", "api.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    command: ["uvicorn", "backend.api.main:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
       - "8000:8000"
     environment:
@@ -12,9 +12,9 @@ services:
       - API_PORT=8000
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY:-}
       - OPENROUTER_BASE_URL=${OPENROUTER_BASE_URL:-https://openrouter.ai/api/v1}
-      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-openai/gpt-oss-120b}
-      - OPENROUTER_FALLBACK_MODEL=${OPENROUTER_FALLBACK_MODEL:-meta-llama/llama-3.3-70b-instruct}
-      - OPENROUTER_VISION_MODEL=${OPENROUTER_VISION_MODEL:-meta-llama/llama-4-scout}
+      - OPENROUTER_MODEL=${OPENROUTER_MODEL:-openai/gpt-4.1-mini}
+      - OPENROUTER_FALLBACK_MODEL=${OPENROUTER_FALLBACK_MODEL:-google/gemini-2.5-flash}
+      - OPENROUTER_VISION_MODEL=${OPENROUTER_VISION_MODEL:-google/gemini-2.5-flash}
     volumes:
       - ./data:/app/data
     restart: unless-stopped
@@ -27,25 +27,12 @@ services:
 
   frontend:
     build:
-      context: .
+      context: ./frontend
       dockerfile: Dockerfile
     container_name: competitor-intelligence-frontend
-    command:
-      [
-        "streamlit",
-        "run",
-        "frontend/app.py",
-        "--server.port",
-        "8501",
-        "--server.address",
-        "0.0.0.0",
-        "--server.headless",
-        "true",
-        "--browser.gatherUsageStats",
-        "false"
-      ]
+    command: ["npm", "run", "start"]
     ports:
-      - "8501:8501"
+      - "3000:3000"
     environment:
       - API_BASE_URL=http://api:8000
     depends_on:

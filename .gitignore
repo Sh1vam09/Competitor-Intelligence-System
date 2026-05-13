@@ -46,6 +46,12 @@ htmlcov/
 .tox/
 .nox/
 
+# Node / Next.js
+node_modules/
+.next/
+out/
+npm-debug.log*
+
 # Data files (generated at runtime)
 data/
 reports/
