@@ -2,7 +2,9 @@
 
 FastAPI + Next.js app for website-based competitor analysis. It crawls a company website, extracts a business profile, discovers local and global competitors, analyzes them, and generates a PDF report.
 
-## Core Flow
+## Architecture Flow
+
+![Architecture Flow](architecture_flow.png)
 
 1. Crawl source website with Playwright.
 2. Clean text and chunk it with LangChain `RecursiveCharacterTextSplitter`.

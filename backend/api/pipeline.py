@@ -21,7 +21,6 @@ from typing import Optional, Callable
 
 from backend.crawler.crawler import AdaptiveCrawler
 from backend.processing.text_processor import remove_boilerplate, chunk_text, count_tokens
-from backend.processing.dom_analyzer import extract_dom_features
 from backend.vision.visual_analyzer import analyze_screenshot
 from backend.extraction.business_extractor import extract_business_profile
 from backend.embedding.embedder import EmbeddingEngine
@@ -205,7 +204,7 @@ class PipelineOrchestrator:
 
             # ── Step 2: Process content ────────────────────────────────────
             self._update_status("Processing content...")
-            all_text_chunks, combined_dom_features = self._process_pages(pages)
+            all_text_chunks = self._process_pages(pages)
 
             if not all_text_chunks:
                 raise ValueError("No usable text content extracted")
@@ -217,7 +216,7 @@ class PipelineOrchestrator:
             # ── Step 4: Business extraction ────────────────────────────────
             self._update_status("Extracting business profile via OpenRouter...")
             business_profile = extract_business_profile(
-                all_text_chunks, combined_dom_features
+                all_text_chunks
             )
 
             brand_name = business_profile.get("brand_name", extract_domain(url))
@@ -239,7 +238,6 @@ class PipelineOrchestrator:
                     brand_name,
                     business_profile,
                     visual_profile,
-                    combined_dom_features,
                     profile_embedding,
                 )
 
@@ -391,7 +389,6 @@ class PipelineOrchestrator:
                     company_url=url,
                     business_profile=business_profile,
                     visual_profile=visual_profile,
-                    dom_features=combined_dom_features,
                     competitors=competitors_for_report,
                     comparison=comparison,
                     executive_summary=executive_summary,
@@ -440,10 +437,9 @@ class PipelineOrchestrator:
                 "error": str(e),
             }
 
-    def _process_pages(self, pages) -> tuple[list[str], dict]:
+    def _process_pages(self, pages) -> list[str]:
         """Process crawled pages: clean text, chunk, extract DOM."""
         cleaned_pages: list[str] = []
-        combined_dom = {}
 
         for i, page in enumerate(pages):
             # Clean text. Some JS-heavy sites put meaningful copy in structures
@@ -461,27 +457,13 @@ class PipelineOrchestrator:
             if cleaned:
                 cleaned_pages.append(cleaned)
 
-            # Extract DOM features (aggregate from first few pages)
-            if i < 5:
-                page_dom = extract_dom_features(page.raw_html)
-                page.dom_structure_features = page_dom
-                if not combined_dom:
-                    combined_dom = page_dom
-                else:
-                    # Sum numeric features, OR boolean features
-                    for k, v in page_dom.items():
-                        if isinstance(v, bool):
-                            combined_dom[k] = combined_dom.get(k, False) or v
-                        elif isinstance(v, (int, float)):
-                            combined_dom[k] = combined_dom.get(k, 0) + v
-
         # Chunk all crawled page text together. Chunking page-by-page can drop
         # many useful short pages under MIN_CHUNK_SIZE even when the site has
         # enough content overall.
         combined_text = "\n\n".join(cleaned_pages)
         all_chunks = chunk_text(combined_text) if combined_text else []
 
-        return all_chunks, combined_dom
+        return all_chunks
 
     def _analyze_visuals(self, pages) -> dict:
         """Run visual analysis on the first available screenshot."""
@@ -503,7 +485,6 @@ class PipelineOrchestrator:
         name,
         profile,
         visual_profile,
-        dom_features,
         embedding,
     ) -> Company:
         """Save or update the company in the database."""
@@ -514,7 +495,6 @@ class PipelineOrchestrator:
             existing.industry = profile.get("industry")
             existing.json_profile = json.dumps(profile)
             existing.visual_profile = json.dumps(visual_profile)
-            existing.dom_features = json.dumps(dom_features)
             existing.embedding_vector = EmbeddingEngine.embedding_to_bytes(embedding)
             db.commit()
             return existing
@@ -525,7 +505,6 @@ class PipelineOrchestrator:
             industry=profile.get("industry"),
             json_profile=json.dumps(profile),
             visual_profile=json.dumps(visual_profile),
-            dom_features=json.dumps(dom_features),
             embedding_vector=EmbeddingEngine.embedding_to_bytes(embedding),
         )
         db.add(company)
@@ -566,7 +545,7 @@ class PipelineOrchestrator:
                 return {"success": False, "error": f"No pages crawled: {comp_url}"}
 
             # Process content
-            comp_chunks, comp_dom = self._process_pages(comp_pages)
+            comp_chunks = self._process_pages(comp_pages)
             if not comp_chunks:
                 return {"success": False, "error": f"No content extracted: {comp_url}"}
 
@@ -574,7 +553,7 @@ class PipelineOrchestrator:
             comp_visual = self._analyze_visuals(comp_pages)
 
             # Business extraction (retries 3× internally, then raises)
-            comp_profile = extract_business_profile(comp_chunks, comp_dom)
+            comp_profile = extract_business_profile(comp_chunks)
             comp_name = comp_profile.get("brand_name", comp_domain)
 
             # Deduplicate by name within this run
@@ -657,7 +636,6 @@ class PipelineOrchestrator:
                 similarity_score=float(similarity),
                 json_profile=json.dumps(comp_profile),
                 visual_profile=json.dumps(comp_visual),
-                dom_features=json.dumps(comp_dom),
                 embedding_vector=EmbeddingEngine.embedding_to_bytes(comp_embedding),
                 scope=scope,
             )

@@ -77,7 +77,6 @@ class CompanyResponse(BaseModel):
     industry: Optional[str]
     json_profile: Optional[dict]
     visual_profile: Optional[dict]
-    dom_features: Optional[dict]
     created_at: Optional[datetime]
 
 

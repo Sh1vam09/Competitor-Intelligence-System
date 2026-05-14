@@ -122,7 +122,6 @@ def generate_report(
     company_url: str,
     business_profile: dict,
     visual_profile: dict,
-    dom_features: dict,
     competitors: list[dict],
     comparison: dict,
     executive_summary: str,
@@ -137,7 +136,6 @@ def generate_report(
         company_url: URL of the analyzed company.
         business_profile: Structured business profile.
         visual_profile: Visual brand analysis profile.
-        dom_features: DOM structural features.
         competitors: Combined list of competitor data dictionaries.
         comparison: Comparative analysis dictionary.
         executive_summary: Executive summary text.
@@ -589,36 +587,7 @@ def _build_profile_section(profile: dict) -> list:
     return elements
 
 
-def _build_dom_section(dom_features: dict) -> list:
-    """Build DOM features display."""
-    elements = []
-    rows = [["Feature", "Value"]]
 
-    feature_labels = {
-        "cta_button_count": "CTA Buttons",
-        "forms_detected": "Forms Detected",
-        "testimonial_blocks": "Testimonial Blocks",
-        "pricing_tables": "Pricing Elements",
-        "navigation_depth": "Navigation Depth",
-        "section_count": "Content Sections",
-        "video_presence": "Video Present",
-        "social_proof_elements": "Social Proof Elements",
-        "image_count": "Images",
-        "heading_count": "Headings",
-        "link_count": "Links",
-        "has_chat_widget": "Chat Widget",
-    }
-
-    for key, label in feature_labels.items():
-        value = dom_features.get(key, "N/A")
-        if isinstance(value, bool):
-            value = "Yes" if value else "No"
-        rows.append([_escape(label), _escape(str(value))])
-
-    table = Table(rows, colWidths=[150, 350])
-    table.setStyle(TABLE_STYLE)
-    elements.append(table)
-    return elements
 
 
 def _build_visual_section(visual_profile: dict) -> list:

@@ -210,7 +210,6 @@ def get_company(company_id: int, db: Session = Depends(get_db_dependency)):
         industry=company.industry,
         json_profile=company.get_profile(),
         visual_profile=company.get_visual_profile(),
-        dom_features=company.get_dom_features(),
         created_at=company.created_at,
     )
 
